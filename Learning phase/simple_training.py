@@ -59,7 +59,7 @@ def simple_trading_stategy(df):
         price = df['Close'].iloc[i]
         sma_20 = df['SMA_20'].iloc[i]
 
-        if rsi < 30 and price > sma_20:
+        if rsi < 30 or price > sma_20:
             signals.append('BUY')
         elif rsi > 70 or price < sma_20:
             signals.append('SELL')
