@@ -17,11 +17,14 @@ def get_stock_data(symbol, period="1y") :
         print(f"Error: {e}")
         return None
 
-def add_simple_indicators(df):
+def add_advanced_indicators(df):
     # simple moving averages
     # SMA is just the sum of the closing prices of a stock over a period of time
+    df['SMA_10'] = df['Close'].rolling(window=10).mean()
     df['SMA_20'] = df['Close'].rolling(window=20).mean() # find mean of the closing prices 
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    # Use Exponential Moving Average that is more sensitive to recent price changes
+    df['EMA_12'] = df['Close'].ewm(span=12).mean() 
 
     # calculate RSI - measures if the stock is overbought (<70) or oversold( <30)
     def calculate_rsi(prices, window=14):
@@ -36,7 +39,44 @@ def add_simple_indicators(df):
     
     df['RSI'] = calculate_rsi(df['Close'])
 
+    # Moving average convergence divergence (MACD), trend, momentum
+    # exp1 - exp2 is the zero line, meaning if exp1 - exp2 > 0 --> bullish, vice versa
+    # MACD goes above signal line --> bullish
+    # for histogram, if positive histogram, MACD rising faster than signal --> bullish momentum increasing, else decreasing
+    # if negative histogram, MACD rising faster than signal --> bearish momentum decreasing, else increasing
+    exp1 = df['Close'].ewm(span=12).mean()
+    exp2 = df['Close'].ewm(span=26).mean()
+    df['MACD'] = exp1 - exp2 # MACD line
+    df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
+    df['MACD_Histogram'] = df['MACD'] - df['MACD_Signal']
+
+    # Bollinger bands - volatility indicator
+    # two bands based on 20 day moving average
+    # if price close to upper band --> potentilly overbough, vice versa
+    # squuezing of bands could signify big price move
+    df['BB_middle'] = df['Close'].rolling(window=20).mean() # middle line of indicator
+    bb_std = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['BB_middle'] + (bb_std * 2)
+    df['BB_Lower'] = df['BB_middle'] - (bb_std * 2)
+
+    # volume indicator
+    # if volume raio is 1.0 -> average, > 1.0 is above average, < 1.0 is below average
+    # a price move that has greater volume is more significant compared to when the volume ratio is lower
+    df['Volume_SMA'] = df['Volume'].rolling(window=20).mean() # average volume
+    df['Volume_ratio'] = df['Volume'] / df['Volume_SMA']
+
+    # Price relationships
+    # for price vs SMA, if > 1 it means that potential to be bullish, prices are increasing
+    # for SMA ratios, if the ratios > 1 -> bullish
+    # if all ratios > 1, there is a very strong uptrend
+
+    df['Price_vs_SMA20'] = df['Close'] / df['SMA_20'] # Price relative to medium trend
+    df['Price_vs_SMA50'] = df['Close'] / df['SMA_50'] # Price relative to long trend
+    df['SMA10_vs_SMA20'] = df['SMA_10'] / df['SMA_20'] # Short vs medium trend
+    df['SMA20_vs_SMA50'] = df['SMA_20'] / df['SMA_50'] # medium vs long trend
+
     df['Price_Change_Pct'] = df['Close'].pct_change() # calculates the price change of closing prices 
+    df['Price_Change_5d'] = df['Close'].pct_change(5) # 5 day change
 
     return df
 
