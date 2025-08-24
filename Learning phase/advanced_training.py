@@ -64,7 +64,7 @@ def add_advanced_indicators(df):
     # if volume raio is 1.0 -> average, > 1.0 is above average, < 1.0 is below average
     # a price move that has greater volume is more significant compared to when the volume ratio is lower
     df['Volume_SMA'] = df['Volume'].rolling(window=20).mean() # average volume
-    df['Volume_ratio'] = df['Volume'] / df['Volume_SMA']
+    df['Volume_Ratio'] = df['Volume'] / df['Volume_SMA']
 
     # Price relationships
     # for price vs SMA, if > 1 it means that potential to be bullish, prices are increasing
@@ -88,7 +88,7 @@ def calculate_signal_strength(row):
     sell_score = 0
 
     # check for NaN values
-    if pd.isna(row['RSO']) or pd.isna[row['SMA_20']] or pd.isna[row['MACD']]:
+    if pd.isna(row['RSI']) or pd.isna(row['SMA_20']) or pd.isna(row['MACD']):
         return 'HOLD', 0.5
 
     # Moving day averages trend
@@ -153,17 +153,17 @@ def calculate_signal_strength(row):
         return 'HOLD', confidence
 
 def smart_trading_strategy(df):
-    Signals = []
-    Confidences = []
+    signals = []
+    confidences = []
 
     for i in range(len(df)):
         row = df.iloc[i]
         signal, confidence = calculate_signal_strength(row)
-        Signals.append(signal)
-        Confidences.append(confidence)
+        signals.append(signal)
+        confidences.append(confidence)
 
-    df['Signal'] = Signals
-    df['Confidences'] = Confidences
+    df['Signal'] = signals
+    df['Confidences'] = confidences
     return df
 
 def backtest_the_strategy(df, initial_capital=10000):
@@ -182,16 +182,35 @@ def backtest_the_strategy(df, initial_capital=10000):
             # buy as many as possible
             risk_amount = capital * min(0.10, confidence * 0.15) # Max 10% of capital
             shares_to_buy = int(risk_amount/price)
+            
+            if shares_to_buy > 0:
+                cost = shares_to_buy * price
+                shares += shares_to_buy
+                capital -= cost
+                trades.append({
+                    'date': date.date(),
+                    'action': 'BUY',
+                    'shares': shares_to_buy,
+                    'price': price,
+                    'confidence': confidence
+                })
+                print(f"{date.date()}: BUY {shares_to_buy} shares at ${price:.2f} (Confidence: {confidence:.2f})")
 
-            shares += shares_to_buy
-            capital -= shares_to_buy * price
-            print(f"{df.index[i].date()} BUY {shares_to_buy} shares at {price:.2f}")
-
-        elif signal == 'SELL' and shares > 0:
-            # just sell all 
-            capital += shares * price
-            print(f"{df.index[i].date()}: SELL {shares} shares at {price:.2f}")
-            shares = 0
+        elif signal == 'SELL' and shares > 0 and confidence > 0.6:
+            # Also sell based on confidence level
+            shares_to_sell = int(shares * confidence)
+            if shares_to_sell > 0:
+                revenue = shares_to_sell * price
+                capital += revenue
+                shares -= shares_to_sell
+                trades.append({
+                    'date': date.date(),
+                    'action': 'SELL',
+                    'shares': shares_to_sell,
+                    'price': price,
+                    'confidence': confidence
+                })
+            print(f"{date.date()}: SELL {shares_to_sell} shares at ${price:.2f} (Confidence: {confidence:.2f})")
         
         # this to calculate the porfolio amount
         portfolio_value = capital + (shares * price)
@@ -201,61 +220,96 @@ def backtest_the_strategy(df, initial_capital=10000):
 
     #calculate returns
     # [-1] is to access the last value in the array
-    total_return = (portfolio_values[-1] - initial_capital) / initial_capital * 100
-    print(f"\nStrategy Performance")
-    print(f"Initial capital: ${initial_capital:,.2f}")
-    print(f"Final Value: ${portfolio_values[-1]:,.2f}")
-    print(f"Total Return: {total_return:.2f}%")
+    final_value = portfolio_values[-1]
+    total_return = (final_value - initial_capital) / initial_capital * 100
 
     #compared to just holding the stock
     buy_hold_return = ((df['Close'].iloc[-1] - df['Close'].iloc[0]) / df['Close'].iloc[0]) * 100
-    print(f"Buy n Hold Return: {buy_hold_return:.2f}%")
 
-    return df
+    # To calculate the max drawdown
+    peak = df['Portfolio_Value'].expanding().max()
+    drawdown = (df['Portfolio_Value'] - peak) / peak * 100
+    max_drawdown = drawdown.min()
 
-def plot_results(df, symbol):
-    """Plot the stock data, indicators, and strategy performance"""
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 10))
+    print(f"\n=== STRATEGY PERFORMANCE ===")
+    print(f"Initial Capital: ${initial_capital:,.2f}")
+    print(f"Final Value: ${final_value:,.2f}")
+    print(f"Total Return: {total_return:.2f}%")
+    print(f"Buy & Hold Return: {buy_hold_return:.2f}%")
+    print(f"Total Trades: {len(trades)}")
+    print(f"Max Drawdown: {max_drawdown:.2f}%")
+
+    return df, trades
+
+def plot_advanced_results(df, symbol):
+    """Plot comprehensive analysis"""
+    fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(16, 20))
     
-    # Plot 1: Price and Moving Averages
+    # Plot 1: Price with Moving Averages
     ax1.plot(df.index, df['Close'], label='Price', color='black', linewidth=2)
-    ax1.plot(df.index, df['SMA_20'], label='20-day SMA', color='blue', alpha=0.7)
-    ax1.plot(df.index, df['SMA_50'], label='50-day SMA', color='red', alpha=0.7)
-    ax1.set_title(f'{symbol} Stock Price and Moving Averages')
+    ax1.plot(df.index, df['SMA_10'], label='SMA 10', color='blue', alpha=0.7)
+    ax1.plot(df.index, df['SMA_20'], label='SMA 20', color='green', alpha=0.7)
+    ax1.plot(df.index, df['SMA_50'], label='SMA 50', color='red', alpha=0.7)
+    ax1.set_title(f'{symbol} Price with Moving Averages')
     ax1.legend()
     ax1.grid(True)
     
     # Plot 2: RSI
     ax2.plot(df.index, df['RSI'], label='RSI', color='purple')
-    ax2.axhline(y=70, color='r', linestyle='--', label='Overbought (70)')
-    ax2.axhline(y=30, color='g', linestyle='--', label='Oversold (30)')
-    ax2.set_title('RSI (Relative Strength Index)')
-    ax2.legend()
-    ax2.grid(True)
+    ax2.axhline(y=75, color='r', linestyle='--', alpha=0.7)
+    ax2.axhline(y=65, color='orange', linestyle='--', alpha=0.7)
+    ax2.axhline(y=35, color='orange', linestyle='--', alpha=0.7)
+    ax2.axhline(y=25, color='g', linestyle='--', alpha=0.7)
+    ax2.set_title('RSI with Multiple Levels')
     ax2.set_ylim(0, 100)
+    ax2.grid(True)
     
-    # Plot 3: Trading Signals
-    buy_signals = df[df['Signal'] == 'BUY']
-    sell_signals = df[df['Signal'] == 'SELL']
-    
-    ax3.plot(df.index, df['Close'], label='Price', color='black', alpha=0.7)
-    ax3.scatter(buy_signals.index, buy_signals['Close'], 
-               color='green', marker='^', s=100, label='Buy Signal')
-    ax3.scatter(sell_signals.index, sell_signals['Close'], 
-               color='red', marker='v', s=100, label='Sell Signal')
-    ax3.set_title('Trading Signals')
+    # Plot 3: MACD
+    ax3.plot(df.index, df['MACD'], label='MACD', color='blue')
+    ax3.plot(df.index, df['MACD_Signal'], label='Signal', color='red')
+    ax3.bar(df.index, df['MACD_Histogram'], label='Histogram', alpha=0.3, color='green')
+    ax3.set_title('MACD Analysis')
     ax3.legend()
     ax3.grid(True)
     
-    # Plot 4: Portfolio Performance
-    ax4.plot(df.index, df['Portfolio_Value'], label='Strategy', color='blue', linewidth=2)
-    # Calculate buy & hold performance for comparison
-    initial_value = df['Portfolio_Value'].iloc[0]
-    buy_hold = initial_value * (df['Close'] / df['Close'].iloc[0])
-    ax4.plot(df.index, buy_hold, label='Buy & Hold', color='red', alpha=0.7)
-    ax4.set_title('Portfolio Performance Comparison')
+    # Plot 4: Bollinger Bands
+    ax4.plot(df.index, df['Close'], label='Price', color='black')
+    ax4.plot(df.index, df['BB_Upper'], label='Upper Band', color='red', alpha=0.7)
+    ax4.plot(df.index, df['BB_middle'], label='Middle Band', color='blue', alpha=0.7)
+    ax4.plot(df.index, df['BB_Lower'], label='Lower Band', color='green', alpha=0.7)
+    ax4.fill_between(df.index, df['BB_Upper'], df['BB_Lower'], alpha=0.1, color='gray')
+    ax4.set_title('Bollinger Bands')
     ax4.legend()
     ax4.grid(True)
+    
+    # Plot 5: Trading Signals with Confidence
+    buy_signals = df[df['Signal'] == 'BUY']
+    sell_signals = df[df['Signal'] == 'SELL']
+    
+    ax5.plot(df.index, df['Close'], label='Price', color='black', alpha=0.7)
+    
+    # Size markers by confidence
+    if len(buy_signals) > 0:
+        ax5.scatter(buy_signals.index, buy_signals['Close'], 
+                   s=buy_signals['Confidence']*200, color='green', marker='^', 
+                   label='Buy Signal', alpha=0.8)
+    if len(sell_signals) > 0:
+        ax5.scatter(sell_signals.index, sell_signals['Close'], 
+                   s=sell_signals['Confidence']*200, color='red', marker='v', 
+                   label='Sell Signal', alpha=0.8)
+    
+    ax5.set_title('Trading Signals (Size = Confidence)')
+    ax5.legend()
+    ax5.grid(True)
+    
+    # Plot 6: Portfolio Performance
+    ax6.plot(df.index, df['Portfolio_Value'], label='Strategy', color='blue', linewidth=2)
+    initial_value = df['Portfolio_Value'].iloc[0]
+    buy_hold = initial_value * (df['Close'] / df['Close'].iloc[0])
+    ax6.plot(df.index, buy_hold, label='Buy & Hold', color='red', alpha=0.7)
+    ax6.set_title('Portfolio Performance')
+    ax6.legend()
+    ax6.grid(True)
     
     plt.tight_layout()
     plt.show()
@@ -268,13 +322,13 @@ def main():
     if df is None: 
         return
     
-    df = add_simple_indicators(df)
+    df = add_advanced_indicators(df)
 
-    df = simple_trading_stategy(df)
+    df = smart_trading_strategy(df)
 
-    df = backtest_simple_strategy(df)
+    df, trades = backtest_the_strategy(df)
 
-    plot_results(df, symbol)
+    plot_advanced_results(df, symbol)
 
 if __name__ == "__main__":
     main()
