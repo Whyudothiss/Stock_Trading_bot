@@ -180,8 +180,8 @@ def backtest_the_strategy(df, initial_capital=10000):
 
         if signal == 'BUY' and capital > price and confidence > 0.6:
             # buy as many as possible
-            risk_amount = capital * min(0.10, confidence * 0.15) # Max 10% of capital
-            shares_to_buy = int(risk_amount/price)
+            # risk_amount = capital * min(0.10, confidence * 0.15) # Max 10% of capital
+            shares_to_buy = int(capital/price)
             
             if shares_to_buy > 0:
                 cost = shares_to_buy * price
@@ -291,11 +291,11 @@ def plot_advanced_results(df, symbol):
     # Size markers by confidence
     if len(buy_signals) > 0:
         ax5.scatter(buy_signals.index, buy_signals['Close'], 
-                   s=buy_signals['Confidence']*200, color='green', marker='^', 
+                   s=buy_signals['Confidences']*200, color='green', marker='^', 
                    label='Buy Signal', alpha=0.8)
     if len(sell_signals) > 0:
         ax5.scatter(sell_signals.index, sell_signals['Close'], 
-                   s=sell_signals['Confidence']*200, color='red', marker='v', 
+                   s=sell_signals['Confidences']*200, color='red', marker='v', 
                    label='Sell Signal', alpha=0.8)
     
     ax5.set_title('Trading Signals (Size = Confidence)')

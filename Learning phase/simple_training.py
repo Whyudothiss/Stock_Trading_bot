@@ -160,7 +160,7 @@ def plot_results(df, symbol):
     plt.show()
 
 def main():
-    symbol = "NVDA"
+    symbol = "GOOG"
     print(f"Analyzing {symbol}")
 
     df = get_stock_data(symbol)
