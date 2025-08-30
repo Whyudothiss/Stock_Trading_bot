@@ -1,3 +1,4 @@
+# Pretty bad strategy with risk management
 import yfinance as yf;
 import pandas as pd;
 import numpy as np;
@@ -315,7 +316,7 @@ def plot_advanced_results(df, symbol):
     plt.show()
 
 def main():
-    symbol = "NVDA"
+    symbol = "RR"
     print(f"Analyzing {symbol}")
 
     df = get_stock_data(symbol)
