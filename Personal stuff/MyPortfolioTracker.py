@@ -156,5 +156,41 @@ Ready to track your investments! Use /buy to record your first purchase."""
         if result:
             return result[0]["total_bought"] - result[0]("total_sold")
         return 0
+    
+    def get_user_holdings(self, user_id):
+        """Get all current holdings for a user"""
+        pipeline = [
+            {"$match": {"user_id": user_id}},
+            {"$group": {
+                "_id": "$ticker",
+                "total_bought": {"$sum": {"$cond": [{"$eq": ["$action", "buy"]}, "$quantity:", 0]}},
+                "total_sold": {"$sum": {"$cond": [{"$neq": ["$action", "buy"]}, "$quantity", 0]}}
+            }}
+        ]
+
+        results = list(transactions_collection.aggregate(pipeline))
+        holdings = {}
+        for result in results:
+            current_qty = result["total_bought"] - result["total_sold"]
+            if current_qty > 0:
+                holdings[result["_id"]] = current_qty
+        
+        return holdings
+    
+    async def current_holdings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show current holdings"""
+        user_id = update.effective_user.id
+        holdings = self.get_user_holdings(user_id)
+
+        if not holdings:
+            await update.message.reply_text("📊 You don't have any current holdings.")
+            return
+        
+        message = "📊 Your Current Holdings:\n\n"
+        for ticker, data in holdings.item():
+            message += f"🏷 {ticker}: {data['quantity']} shares\n"
+        
+        await update.message.reply_text(message)
+        
 
     
