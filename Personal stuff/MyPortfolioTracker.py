@@ -135,4 +135,26 @@ Ready to track your investments! Use /buy to record your first purchase."""
             await update.message.reoly_text("Please enter a valid price)")
             return PRICE
 
+    async def sell_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start sell transaction"""
+        context.user_data['action'] = 'sell'
+        await update.message.reply_text("📉 Let's record a stock sale!\n\nWhat's the ticker symbol?")
+        return TICKER
+    
+    def get_current_positions(self, user_id, ticker):
+        """Get current positions for a user and ticker"""
+        pipeline = [
+            {"$match": {"user_id": user_id, "ticker": ticker}},
+            {"$group": {
+                "_id": "$ticker",
+                "total_bought": {"$sum": {"$cond": [{"$eq": ["$action", "buy"]}, "$quantity", 0]}},
+                "total_sold": {"$sum": {"$cond": [{"$neq": ["$action", "buy"]}, "$quantity", 0]}}
+            }}
+        ]
+
+        result = list(transactions_collection.aggregate(pipeline))
+        if result:
+            return result[0]["total_bought"] - result[0]("total_sold")
+        return 0
+
     
