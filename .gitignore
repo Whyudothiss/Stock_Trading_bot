@@ -10,6 +10,11 @@ ENV/
 env.bak/
 venv.bak/
 
+# Environment variables
+.env
+.env.local
+.env.production
+
 # IDE
 .vscode/
 .idea/
@@ -19,3 +24,11 @@ venv.bak/
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite3
