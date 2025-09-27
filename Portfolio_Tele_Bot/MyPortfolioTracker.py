@@ -195,7 +195,91 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
         context.user_data['action'] = 'sell'
         await update.message.reply_text("📉 Let's record a stock sale!\n\nWhat's the ticker symbol?")
         return TICKER
+
+    async def trim_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Start trim transaction"""
+        await update.message.reply_text("✂️ Let's record a stock trim (partial sell)!\n\nWhat's the ticker symbol?")
+        return TICKER
+
+    async def get_trim_ticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Get ticker symbol for trim"""
+        ticker = update.message.text.strip().upper()
+        user_id = update.effective_user.id
+
+        current_position = self.get_current_positions(user_id, ticker)
+        if current_position <= 0:
+            await update.message.reply_text(f"❌ You don't currently own any {ticker} shares.")
+            return ConversationHandler.END
+        
+        context.user_data['ticker'] = ticker
+        context.user_data['current_position'] = current_position
+
+        keyboard = [['Percentage', 'Quantity']]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+
+        await update.message.reply_test(
+            f"Stock: {ticker}\nCurrent position: {current_position} shares\n\n"
+            "How would you like to trim?",
+            reply_markup=reply_markup
+        )
+        return TRIM_TYPE
     
+    async def get_trim_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        trim_type = update.message.text.strip().lower()
+        if trim_type not in ['percentage', 'quantity']:
+            await update.message.reply_text("Please choose either Percentage or Quantity")
+            return TRIM_TYPE
+        ticker = context.user_data['ticker']
+        context.user_data['trim_type'] = trim_type
+        current_position = context.user_data['current)position']
+
+        if trim_type == 'percentage':
+            await update.message.reply_test(
+                f"Stock: {ticker}\nCurrent: {current_position} shares\n\n"
+                "What percentage would you like to sell? (e.g., 25 for 25%)",
+                reply_markup=ReplyKeyboardRemove()
+            )
+        else:
+            await update.message.reply_text(
+                f"Stock: {ticker}\nCurrent: {current_position} shares\n\n"
+                "How many shares would you like to sell?",
+                reply_markup=ReplyKeyboardRemove()
+            )
+        return TRIM_VALUE
+
+    async def get_trim_value(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        try:
+            value = float(update.message.text)
+            trim_type = context.user_data['trim_type']
+            ticker = context.user_data['ticker']
+            current_position = context.user_data['current_position']
+
+            # For percentage trim type
+            if trim_type == 'percentage':
+                if value <= 0 or value > 100:
+                    await update.message.reply_text("Please enter a percentage between 0 and 100")
+                    return TRIM_VALUE
+                quantity = (value / 100) * current_position
+            # For quantity trim type
+            else:
+                if value <= 0 value > current_position:
+                    await update.message.reply_text(f"Please enter a quantity between 0 and {current_position}")
+                    return TRIM_VALUE
+                quantity = value
+            
+            context.user_data['quantity'] = quantity
+            context.user_data['action'] = 'trim'
+
+            await update.message.reply_text(f"Stock: {ticker}\n"
+                f"Selling: {quantity:.2f} shares ({(quantity/current_position)*100:.1f}%)\n"
+                f"Remaining: {current_position - quantity:.2f} shares\n\n"
+                "At what price are you selling? (USD)"
+            )
+            return PRICE
+        except ValueError:
+            await update.message.reply_text("Please enter a valid number")
+            return TRIM_VALUE
+
     def get_current_positions(self, user_id, ticker):
         """Get current positions for a user and ticker"""
         pipeline = [
