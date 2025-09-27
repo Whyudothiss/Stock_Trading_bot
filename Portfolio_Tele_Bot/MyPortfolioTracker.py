@@ -152,6 +152,14 @@ Ready to track your investments! Use /buy to record your first purchase."""
             action = context.user_data['action']
             total_value = quantity * price
 
+            # Check for sell/trim whether user has enough shares
+            if action in ['sell', 'trim']:
+                current_position = self.get_current_positions(user_id, ticker)
+                if current_position < quantity:
+                    await update.message.reply_test(f"❌ Error: You only own {current_position} shares of {ticker}, "
+                        f"but trying to {action} {quantity} shares.\n\nTransaction cancelled.")
+                    return ConversationHandler.END
+
             transaction ={
                 "user_id": user_id,
                 "ticker": ticker,
@@ -163,7 +171,20 @@ Ready to track your investments! Use /buy to record your first purchase."""
             }
 
             transactions_collection.insert_one(transaction)
-            await update.message.reply_text(f"✅ {ticker} purchase recorded!")
+
+            action_emoji = "📈" if action == "buy" else "📉"
+            confirmation = f"""
+{action_emoji} Transaction Recorded!
+Stock: {ticker}
+Action: {action.upper()}
+Quantity: {quantity} shares
+Price: ${price:.2f}
+Total: ${total_value:.2f}
+Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+✅ Successfully added to your portfolio! 
+           """
+            await update.message.reply_text(confirmation)
             return ConversationHandler.END
         except ValueError:
             await update.message.reoly_text("Please enter a valid price)")
@@ -198,41 +219,31 @@ Ready to track your investments! Use /buy to record your first purchase."""
             {"$group": {
                 "_id": "$ticker",
                 "total_bought": {"$sum": {"$cond": [{"$eq": ["$action", "buy"]}, "$quantity", 0]}},
-                "total_sold": {"$sum": {"$cond": [{"$ne": ["$action", "buy"]}, "$quantity", 0]}},
-                "avg_buy_price": {"$avg": {"$cond": [{"$eq": ["$action", "buy"]}, "$price", 0]}},
-                "total_value": {"$sum": {"$cond": [{"$eq": ["$action", "buy"]}, "$total_value", 0]}}
-            }},
-            {"$match": {
-                "$expr": {"$gt": [{"$subtract": ["$total_bought", "$total_sold"]}, 0]}
+                "total_sold": {"$sum": {"$cond": [{"$neq": ["$action", "buy"]}, "$quantity", 0]}}
             }}
         ]
-        return list(transactions_collection.aggregate(pipeline))
 
+        results = list(transactions_collection.aggregate(pipeline))
+        holdings = {}
+        for result in results:
+            current_qty = result["total_bought"] - result["total_sold"]
+            if current_qty > 0:
+                holdings[result["_id"]] = current_qty
+        
+        return holdings
+    
     async def current_holdings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show current holdings command"""
+        """Show current holdings"""
         user_id = update.effective_user.id
         holdings = self.get_user_holdings(user_id)
 
         if not holdings:
-            await update.message.reply_text("You don't have any current holdings.")
+            await update.message.reply_text("📊 You don't have any current holdings.")
             return
-
-        message = "📊 Current Holdings:\n\n"
-        total_portfolio_value = 0
-
-        for holding in holdings:
-            ticker = holding["_id"]
-            shares = holding["total_bought"] - holding["total_sold"]
-            avg_price = holding["avg_buy_price"]
-            position_value = shares * avg_price
-            total_portfolio_value += position_value
-
-            message += f"🔸 {ticker}:\n"
-            message += f"   Shares: {shares:.2f}\n"
-            message += f"   Avg Price: ${avg_price:.2f}\n"
-            message += f"   Position Value: ${position_value:.2f}\n\n"
-
-        message += f"Total Portfolio Value: ${total_portfolio_value:.2f}"
+        
+        message = "📊 Your Current Holdings:\n\n"
+        for ticker, data in holdings.items():
+            message += f"🏷 {ticker}: {data['quantity']} shares\n"
         
         await update.message.reply_text(message)
        
