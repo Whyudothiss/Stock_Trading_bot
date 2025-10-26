@@ -675,8 +675,20 @@ def main():
         interval=timedelta(days=1)
     )
 
-    print("Bot started...")
-    application.run_polling()
+    # Configure port for Railway deployment
+    port = int(os.getenv("PORT", 8080))
+    print(f"🎯 myPortfolioTracker bot is starting on port {port}...")
+    
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        print("Running on Railway - using webhooks")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            webhook_url=f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}"
+        )
+    else:
+        print("Running locally - using polling")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
     
 if __name__ == '__main__':
     main()    
