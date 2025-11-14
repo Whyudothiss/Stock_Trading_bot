@@ -2,6 +2,7 @@ from datetime import datetime
 import pandas as pd
 from .data import get_trading_days
 from .config import FIXED_RISK, R_MULTIPLE_TARGET, FORWARD_DAYS
+
 def calculate_label(ticker, entry_date, entry_price, stop_loss):
     """Return 1 if trade hits a 3R profit before stop loss, else 0."""
     try: 

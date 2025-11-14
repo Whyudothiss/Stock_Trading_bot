@@ -1,0 +1,11 @@
+{
+  "total": 744,
+  "counts": {
+    "STOPPED_BEFORE_3R": 59,
+    "DATA_ERROR": 23,
+    "HIT_5R": 120,
+    "LOSS_1R": 536,
+    "AMBIGUOUS_BAR": 5,
+    "NO_3R": 1
+  }
+}

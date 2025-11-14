@@ -554,13 +554,13 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
     async def pnl_summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show PnL summary"""
         user_id = update.effective_user.id
-        past_poistions = self.get_past_positions_with_pnl(user_id)
+        past_positions = self.get_past_positions_with_pnl(user_id)
         current_holdings = self.get_user_holdings(user_id)
 
         # Realised P&L from past positions
         realized_pnl = sum(
             (data["total_sold"] - data["total_bought"])
-            for data in past_poistions.values()
+            for data in past_positions.values()
         )
 
         # Current investments

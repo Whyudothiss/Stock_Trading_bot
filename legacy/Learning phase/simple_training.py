@@ -20,8 +20,10 @@ def get_stock_data(symbol, period="1y") :
 def add_simple_indicators(df):
     # simple moving averages
     # SMA is just the sum of the closing prices of a stock over a period of time
+    df['SMA_10'] = df['Close'].rolling(window=10).mean()
     df['SMA_20'] = df['Close'].rolling(window=20).mean() # find mean of the closing prices 
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
 
     # calculate RSI - measures if the stock is overbought (<70) or oversold( <30)
     def calculate_rsi(prices, window=14):
