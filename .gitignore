@@ -32,3 +32,9 @@ logs/
 # Database
 *.db
 *.sqlite3
+
+# Scanner results (temporary outputs)
+results/scanners/*.json
+
+# Cache files (downloaded stock data)
+data/cache/
