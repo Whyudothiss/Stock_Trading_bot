@@ -1,0 +1,11 @@
+{
+  "total_negatives": 800,
+  "categories": {
+    "TOO_EARLY": 200,
+    "WRONG_TICKER": 200,
+    "WRONG_TIMING": 200,
+    "NEAR_MISS": 200
+  },
+  "generated_date": "2025-11-15T15:54:01.690642",
+  "method": "synthetic"
+}
