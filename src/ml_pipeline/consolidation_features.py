@@ -452,7 +452,7 @@ if __name__ == '__main__':
     # Extract features from negatives
     print("\n\n🔴 Step 2: Extracting features from NEGATIVE examples...\n")
     negative_features = extractor.extract_from_negative_examples(
-        negatives_file='data/processed/negative_labels_consolidation.jsonl',
+        negatives_file='data/processed/negative_labels_consolidation_verified.jsonl',
         output_file='data/processed/features_negative.jsonl'
     )
     
