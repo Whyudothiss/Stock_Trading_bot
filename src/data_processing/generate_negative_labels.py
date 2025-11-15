@@ -19,6 +19,7 @@ import yfinance as yf
 from pathlib import Path
 from datetime import datetime, timedelta
 import random
+import time
 from typing import List, Dict, Tuple
 
 
@@ -398,11 +399,11 @@ if __name__ == '__main__':
     generator = NegativeLabelGenerator(POSITIVE_TRADES_FILE)
     
     # Generate negatives (aiming for ~2x positive examples)
-    # 744 positives → ~1500 negatives
+    # 744 positives → ~900 negatives (reduced to avoid rate limits)
     negatives = generator.generate_all_negatives(
-        failed_breakouts=600,    # 40%
-        near_misses=450,         # 30%
-        random_non_patterns=450  # 30%
+        failed_breakouts=300,    # Reduced from 600
+        near_misses=300,         # Reduced from 450
+        random_non_patterns=300  # Reduced from 450
     )
     
     # Save results
