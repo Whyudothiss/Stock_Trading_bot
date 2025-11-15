@@ -51,7 +51,7 @@ class ConsolidationFeatureExtractor:
         """
         # Fetch data if not provided
         if data is None:
-            start_date = date - timedelta(days=self.lookback_days + 60)  # Extra for SMAs
+            start_date = date - timedelta(days=self.lookback_days + 80)  # Extra for SMAs (was 60)
             end_date = date + timedelta(days=1)
             
             try:
@@ -62,6 +62,10 @@ class ConsolidationFeatureExtractor:
                     progress=False,
                     auto_adjust=True
                 )
+                
+                # Flatten MultiIndex columns if present
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
                 
                 if df is None or len(df) < self.lookback_days + 50:
                     return None
@@ -122,13 +126,13 @@ class ConsolidationFeatureExtractor:
     
     def _price_features(self, window: pd.DataFrame) -> Dict:
         """Extract price action features."""
-        high = window['High'].max()
-        low = window['Low'].min()
-        close = window['Close'].iloc[-1]
-        open_price = window['Open'].iloc[0]
+        high = float(window['High'].max())
+        low = float(window['Low'].min())
+        close = float(window['Close'].iloc[-1])
+        open_price = float(window['Open'].iloc[0])
         
         price_range = high - low
-        range_pct = (price_range / high) * 100 if high > 0 else 0
+        range_pct = (price_range / low) * 100 if low > 0 else 0
         
         # Position in range (0 = at low, 1 = at high)
         position_in_range = (close - low) / price_range if price_range > 0 else 0.5
@@ -137,10 +141,10 @@ class ConsolidationFeatureExtractor:
         price_change_pct = ((close - open_price) / open_price) * 100 if open_price > 0 else 0
         
         # Volatility (std of daily returns)
-        volatility = window['Return_1d'].std() if 'Return_1d' in window else 0
+        volatility = float(window['Return_1d'].std()) if 'Return_1d' in window.columns else 0
         
         # Average daily range
-        avg_daily_range = ((window['High'] - window['Low']) / window['Close']).mean() * 100
+        avg_daily_range = float(((window['High'] - window['Low']) / window['Close']).mean() * 100)
         
         return {
             'price_high': float(high),
@@ -181,15 +185,15 @@ class ConsolidationFeatureExtractor:
     
     def _sma_features(self, window: pd.DataFrame, full_history: pd.DataFrame) -> Dict:
         """Extract SMA relationship features."""
-        close = window['Close'].iloc[-1]
+        close = float(window['Close'].iloc[-1])
         closes = window['Close'].values
         lows = window['Low'].values
         highs = window['High'].values
         
         # Distance from SMAs
-        sma_10 = full_history['SMA_10'].iloc[-1]
-        sma_20 = full_history['SMA_20'].iloc[-1]
-        sma_50 = full_history['SMA_50'].iloc[-1]
+        sma_10 = float(full_history['SMA_10'].iloc[-1]) if not pd.isna(full_history['SMA_10'].iloc[-1]) else 0
+        sma_20 = float(full_history['SMA_20'].iloc[-1]) if not pd.isna(full_history['SMA_20'].iloc[-1]) else 0
+        sma_50 = float(full_history['SMA_50'].iloc[-1]) if not pd.isna(full_history['SMA_50'].iloc[-1]) else 0
         
         dist_sma10_pct = ((close - sma_10) / sma_10) * 100 if not pd.isna(sma_10) and sma_10 > 0 else 0
         dist_sma20_pct = ((close - sma_20) / sma_20) * 100 if not pd.isna(sma_20) and sma_20 > 0 else 0
