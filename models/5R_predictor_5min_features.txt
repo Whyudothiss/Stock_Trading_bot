@@ -1,0 +1,17 @@
+consol_range_pct
+consol_position_in_range
+consol_volatility
+consol_volume_trend
+consol_days_near_high
+gap_pct
+first_candle_range_pct
+first_candle_body_ratio
+first_candle_close_position
+first_candle_volume_ratio
+early_high_flag
+risk_per_share
+risk_pct
+risk_reward_ratio
+minutes_since_open
+entry_position_in_bar
+entry_vs_day_high_pct
