@@ -18,7 +18,8 @@ def main():
     
     # Test tickers - add your own here
     tickers = [
-        'RIVN'
+        'RIVN', 'ONDS', 'BW', 'BBAI', 'GSAT', 'LMND', 'AXTI',
+        'TSEM', 'REAL', 'BE', 'GRAL', 'MU', 'WDC', 'SNDK', 'CSIQ'
     ]
     
     print("\n🔍 Quick Scan Test\n")
