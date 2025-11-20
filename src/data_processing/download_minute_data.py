@@ -98,7 +98,7 @@ class AlpacaMinuteDownloader:
             'end': end_str,
             'timeframe': timeframe,
             'adjustment': 'split',
-            'feed': 'iex',
+            'feed': 'sip',  # Use SIP feed for consolidated market data (all exchanges)
             'limit': 10000
         }
         
