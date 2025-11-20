@@ -42,6 +42,7 @@ results/scanners/*.json
 
 # Ignore all JSONL files
 *.jsonl
+data/processed/*.jsonl
 
 # Cache files (downloaded stock data)
 data/cache/
