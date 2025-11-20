@@ -36,5 +36,12 @@ logs/
 # Scanner results (temporary outputs)
 results/scanners/*.json
 
+# Ignore all JSON and TXT files
+*.json
+*.txt
+
+# Ignore all JSONL files
+*.jsonl
+
 # Cache files (downloaded stock data)
 data/cache/
