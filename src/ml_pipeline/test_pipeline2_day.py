@@ -1,7 +1,7 @@
 """
 Test Pipeline 2 for entire trading day
 Checks every 5-minute candle from 9:30 AM to 4:00 PM
-Shows when probability crosses the 30% threshold
+Shows when probability crosses the 45% threshold
 """
 
 import sys
@@ -23,7 +23,7 @@ def test_pipeline2_full_day(ticker, date_str):
         ticker: Stock ticker (e.g., 'RGTI')
         date_str: Date in format 'YYYY-MM-DD' (e.g., '2025-10-02')
     
-    Shows all candles and highlights when probability >= 30%
+    Shows all candles and highlights when probability >= 45%
     """
     print(f"\n{'='*80}")
     print(f"Pipeline 2 Full Day Analysis: {ticker} on {date_str}")
@@ -87,7 +87,7 @@ def test_pipeline2_full_day(ticker, date_str):
             'stop': stop_price,
             'risk_pct': features_dict.get('risk_pct', 0),
             'probability': prob,
-            'passes': prob >= 0.30
+            'passes': prob >= 0.45
         })
     
     # Display results
@@ -119,7 +119,7 @@ def test_pipeline2_full_day(ticker, date_str):
         print(f"🎯 First PASS at {first_pass['time']}")
         print(f"   Entry: ${first_pass['entry']:.2f}, Stop: ${first_pass['stop']:.2f}, Probability: {first_pass['probability']*100:.1f}%")
     else:
-        print("❌ No candles passed Pipeline 2 threshold (30%)")
+        print("❌ No candles passed Pipeline 2 threshold (45%)")
     
     return results
 
