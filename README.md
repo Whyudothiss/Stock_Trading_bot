@@ -29,9 +29,3 @@ This project predicts high-probability breakout trades in US stocks using a mach
 - **Volume & Price Action:** The strategy combines classic technical analysis (consolidation, breakout, volume) with machine learning for objective, data-driven trade selection.
 - **Proven Results:** Backtests show high win rates and strong returns when following the model's top-ranked signals.
 
-## Typical Use Cases
-- **Backtesting:** Simulate years of trades to see how the strategy would have performed.
-- **Live Trading:** Use the model to filter for the best breakout setups each day.
-- **Research:** Analyze which features matter most for successful breakouts.
-
-For more details on setup, features, and results, see the summary and setup files in the repo.
