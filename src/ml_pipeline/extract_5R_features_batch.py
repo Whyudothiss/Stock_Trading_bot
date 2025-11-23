@@ -14,11 +14,13 @@ import sys
 from pathlib import Path
 from datetime import datetime
 import time
+import pandas as pd
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
 from ml_pipeline.breakout_features import BreakoutFeatureExtractor
+from data_processing.download_minute_data import TwelveDataMinuteDownloader, DailyLimitExceededError
 
 def load_trades(filepath):
     """Load trades from JSONL file, filtering out excluded labels"""
@@ -100,66 +102,70 @@ def process_batch(trades, timeframe, output_file):
     print(f"Processing {len(trades)} trades with {timeframe} features...")
     print(f"{'='*80}")
     
-    extractor = BreakoutFeatureExtractor(timeframe=timeframe)
+    # Use the new TwelveData downloader and inject it into the extractor
+    downloader = TwelveDataMinuteDownloader()
+    extractor = BreakoutFeatureExtractor(timeframe=timeframe, downloader=downloader)
     
-    results = []
-    failed = []
-    
-    start_time = time.time()
-    
-    for i, trade in enumerate(trades, 1):
-        # Progress update every 50 trades
-        if i % 50 == 0:
-            elapsed = time.time() - start_time
-            rate = i / elapsed
-            remaining = (len(trades) - i) / rate
-            print(f"Progress: {i}/{len(trades)} ({i/len(trades)*100:.1f}%) - "
-                  f"ETA: {remaining/60:.1f} min")
-        
-        features = extract_features_for_trade(trade, extractor, timeframe)
-        
-        if features is not None:
-            results.append(features)
-        else:
-            failed.append({
-                'ticker': trade['ticker'],
-                'entry_date': trade['entry_date'][:10],
-                'reason': 'Feature extraction failed'
-            })
-    
-    # Save results
+    # --- Logic for resuming progress ---
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    with open(output_path, 'w') as f:
-        for result in results:
-            f.write(json.dumps(result) + '\n')
+    try:
+        processed_df = pd.read_json(output_path, lines=True)
+        # Create a set of already processed trades for quick lookup
+        processed_trades = set(zip(processed_df['ticker'], processed_df['entry_date']))
+        print(f"Resuming. Found {len(processed_trades)} already processed trades in {output_path.name}")
+    except (FileNotFoundError, ValueError):
+        processed_df = pd.DataFrame()
+        processed_trades = set()
+    # ------------------------------------
+
+    newly_extracted_features = []
+    failed_count = 0
     
-    # Summary
-    elapsed = time.time() - start_time
-    success_rate = len(results) / len(trades) * 100
+    start_time = time.time()
     
-    print(f"\n{'='*80}")
-    print(f"✅ {timeframe} Feature Extraction Complete")
-    print(f"{'='*80}")
-    print(f"Successful: {len(results)}/{len(trades)} ({success_rate:.1f}%)")
-    print(f"Failed: {len(failed)}/{len(trades)} ({len(failed)/len(trades)*100:.1f}%)")
-    print(f"Time elapsed: {elapsed/60:.1f} minutes")
-    print(f"Saved to: {output_path}")
+    try:
+        for i, trade in enumerate(trades, 1):
+            # --- Check if trade is already processed ---
+            # Normalize date for the check
+            entry_date_check = trade['entry_date'].split('T')[0]
+            if (trade['ticker'], entry_date_check) in processed_trades:
+                continue
+            # -----------------------------------------
+
+            print(f"Processing {i}/{len(trades)}: {trade['ticker']} on {entry_date_check}")
+            
+            features = extract_features_for_trade(trade, extractor, timeframe)
+            
+            if features:
+                newly_extracted_features.append(features)
+            else:
+                failed_count += 1
+
+    except DailyLimitExceededError:
+        print("\n🛑 Daily API limit reached. Saving progress and shutting down.")
+        print("   Run the script again tomorrow to resume.")
     
-    # Show label distribution
-    positive = sum(1 for r in results if r['label'] == 1)
-    negative = len(results) - positive
-    print(f"\nLabel distribution:")
-    print(f"  Positive (HIT_5R): {positive} ({positive/len(results)*100:.1f}%)")
-    print(f"  Negative (LOSS): {negative} ({negative/len(results)*100:.1f}%)")
-    
-    if failed:
-        print(f"\n⚠️  Failed trades (first 10):")
-        for fail in failed[:10]:
-            print(f"  - {fail['ticker']} ({fail['entry_date']}): {fail['reason']}")
-    
-    return results, failed
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}")
+
+    finally:
+        # --- Save Progress ---
+        if newly_extracted_features:
+            new_features_df = pd.DataFrame(newly_extracted_features)
+            # Append new features to the existing ones
+            final_df = pd.concat([processed_df, new_features_df], ignore_index=True)
+            final_df.to_json(output_path, orient='records', lines=True)
+            print(f"\n✅ Saved {len(newly_extracted_features)} new feature sets. Total is now {len(final_df)}.")
+        else:
+            print("\nNo new features were extracted in this run.")
+        
+        elapsed = time.time() - start_time
+        print(f"Time elapsed this run: {elapsed/60:.1f} minutes")
+        print(f"Failures this run: {failed_count}")
+
+    return len(processed_df) + len(newly_extracted_features), failed_count
 
 
 def main():
@@ -183,22 +189,22 @@ def main():
     results_1min, failed_1min = process_batch(
         trades,
         timeframe='1Min',
-        output_file=output_dir / "features_5R_1min.jsonl"
+        output_file=output_dir / "features_5R_1min_twelvedata.jsonl"
     )
-    
+
     # Process 5-min features
     results_5min, failed_5min = process_batch(
         trades,
         timeframe='5Min',
-        output_file=output_dir / "features_5R_5min.jsonl"
+        output_file=output_dir / "features_5R_5min_twelvedata.jsonl"
     )
-    
+
     # Final summary
     print(f"\n{'='*80}")
     print(f"🎉 BATCH FEATURE EXTRACTION COMPLETE")
     print(f"{'='*80}")
-    print(f"1-Min features: {len(results_1min)} trades")
-    print(f"5-Min features: {len(results_5min)} trades")
+    print(f"1-Min features: {results_1min} trades")
+    print(f"5-Min features: {results_5min} trades")
     print(f"\nNext steps:")
     print(f"1. Train model on 1-min features: python3 src/ml_pipeline/train_5R_model.py --timeframe 1min")
     print(f"2. Train model on 5-min features: python3 src/ml_pipeline/train_5R_model.py --timeframe 5min")
