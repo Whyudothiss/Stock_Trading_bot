@@ -189,14 +189,14 @@ def main():
     results_1min, failed_1min = process_batch(
         trades,
         timeframe='1Min',
-        output_file=output_dir / "features_5R_1min_twelvedata.jsonl"
+        output_file=output_dir / "features_5R_1min_twelve.jsonl"
     )
 
     # Process 5-min features
     results_5min, failed_5min = process_batch(
         trades,
         timeframe='5Min',
-        output_file=output_dir / "features_5R_5min_twelvedata.jsonl"
+        output_file=output_dir / "features_5R_5min_twelve.jsonl"
     )
 
     # Final summary

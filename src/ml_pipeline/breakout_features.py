@@ -24,18 +24,15 @@ from data_processing.download_minute_data import AlpacaMinuteDownloader
 class BreakoutFeatureExtractor:
     """Extract features for breakout trades to predict 5R success"""
     
-    def __init__(self, timeframe: str = '1Min', downloader=None):
+    def __init__(self, timeframe: str = '1Min'):
         """
         Initialize extractor
         
         Args:
             timeframe: '1Min' or '5Min' for intraday analysis
-            downloader: An optional data downloader instance (e.g., AlpacaMinuteDownloader).
-                        If None, defaults to AlpacaMinuteDownloader.
         """
         self.timeframe = timeframe
-        # Allow injecting a different downloader (like TwelveData)
-        self.minute_downloader = downloader if downloader else AlpacaMinuteDownloader()
+        self.minute_downloader = AlpacaMinuteDownloader()
         
         # For daily data (pre-breakout consolidation)
         self.lookback_days = 10
@@ -310,11 +307,11 @@ def main():
     extractor = BreakoutFeatureExtractor(timeframe='1Min')
     
     # Test with a sample trade
-    test_ticker = "AAPL"
-    test_entry_date = datetime(2024, 11, 14)
-    test_entry_price = 226.0
-    test_stop_price = 224.5
-    test_target_price = 233.5  # 5R from entry
+    test_ticker = "TWST"
+    test_entry_date = datetime(2023, 11, 17)
+    test_entry_price = 22.75
+    test_stop_price = 20.59
+    test_target_price = 33.55  # 5R from entry
     
     print(f"Extracting features for {test_ticker} on {test_entry_date.date()}...")
     print(f"Entry: ${test_entry_price}, Stop: ${test_stop_price}, Target: ${test_target_price}\n")

@@ -4,6 +4,7 @@ Minute Data Downloader - Downloads intraday historical data using Alpaca API
 Supports both 1-minute and 5-minute timeframes
 """
 
+
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,6 +13,8 @@ from dotenv import load_dotenv
 import time
 import requests
 from typing import Optional
+import threading
+import json
 
 # Load environment variables
 load_dotenv()
