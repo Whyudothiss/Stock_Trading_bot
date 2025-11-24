@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime
 import time
 import pandas as pd
+import argparse
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -105,6 +106,18 @@ def process_batch(trades, timeframe, output_file):
     # Use the new TwelveData downloader and inject it into the extractor
     downloader = TwelveDataMinuteDownloader()
     extractor = BreakoutFeatureExtractor(timeframe=timeframe, downloader=downloader)
+
+    # Show which (ticker, date) have already been downloaded (helps resume and avoid re-requests)
+    try:
+        downloaded = downloader.list_downloaded()
+        if downloaded:
+            print(f"Found {len(downloaded)} cached downloads in Twelve Data manifest (first 10 shown):")
+            for d in downloaded[:10]:
+                print(f"  - {d.get('ticker')} on {d.get('date')} ({d.get('timeframe')})")
+        else:
+            print("No entries found in Twelve Data manifest (no cached downloads yet)")
+    except Exception:
+        pass
     
     # --- Logic for resuming progress ---
     output_path = Path(output_file)
@@ -173,9 +186,20 @@ def main():
     labels_file = Path(__file__).parent.parent.parent / "data" / "processed" / "ml_5R_labels_filtered.jsonl"
     output_dir = Path(__file__).parent.parent.parent / "data" / "processed"
     
+    # CLI: allow running only 1min or 5min, and optional limit for smoke tests
+    parser = argparse.ArgumentParser(description='Batch feature extraction (Twelve Data)')
+    parser.add_argument('--timeframe', choices=['1min', '5min', 'both'], default='both',
+                        help='Which timeframe to extract (default: both)')
+    parser.add_argument('--limit', type=int, default=0,
+                        help='Limit number of trades to process (0 = no limit)')
+    args = parser.parse_args()
+
     # Load trades
     print(f"Loading trades from: {labels_file}")
     trades = load_trades(labels_file)
+    if args.limit and args.limit > 0:
+        trades = trades[:args.limit]
+        print(f"🔎 Running in limited mode: processing first {len(trades)} trades")
     print(f"✅ Loaded {len(trades)} trades for training")
     
     # Show distribution
@@ -185,19 +209,21 @@ def main():
     for label, count in sorted(label_dist.items(), key=lambda x: -x[1]):
         print(f"  {label}: {count} ({count/len(trades)*100:.1f}%)")
     
-    # Process 1-min features
-    results_1min, failed_1min = process_batch(
-        trades,
-        timeframe='1Min',
-        output_file=output_dir / "features_5R_1min_twelve.jsonl"
-    )
+    results_1min = results_5min = failed_1min = failed_5min = 0
 
-    # Process 5-min features
-    results_5min, failed_5min = process_batch(
-        trades,
-        timeframe='5Min',
-        output_file=output_dir / "features_5R_5min_twelve.jsonl"
-    )
+    if args.timeframe in ('1min', 'both'):
+        results_1min, failed_1min = process_batch(
+            trades,
+            timeframe='1Min',
+            output_file=output_dir / "features_5R_1min_twelve.jsonl"
+        )
+
+    if args.timeframe in ('5min', 'both'):
+        results_5min, failed_5min = process_batch(
+            trades,
+            timeframe='5Min',
+            output_file=output_dir / "features_5R_5min_twelve.jsonl"
+        )
 
     # Final summary
     print(f"\n{'='*80}")

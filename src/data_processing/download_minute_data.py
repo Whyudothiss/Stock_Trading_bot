@@ -196,7 +196,7 @@ class TwelveDataMinuteDownloader:
     # --- Thread-safe, class-level rate limiting mechanism ---
     _api_call_timestamps = []
     _rate_limit_lock = threading.Lock()
-    _CALLS_PER_MINUTE = 8
+    _CALLS_PER_MINUTE = 7
     # ---------------------------------------------------------
     _DAILY_LIMIT = 790 # Set slightly below 800 for safety
     _daily_limit_counter_file = Path('data/cache/twelvedata_daily_counter.json')
@@ -213,6 +213,16 @@ class TwelveDataMinuteDownloader:
         # Cache directory for Twelve Data
         self.cache_dir = Path('data/cache/twelvedata_minute_data')
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Manifest file to record which (ticker, date, timeframe) have been downloaded
+        self._manifest_file = self.cache_dir / 'twelvedata_manifest.json'
+        self._manifest_lock = threading.Lock()
+        # Ensure manifest exists
+        if not self._manifest_file.exists():
+            try:
+                with open(self._manifest_file, 'w') as f:
+                    json.dump([], f)
+            except Exception:
+                pass
 
     def _check_and_update_daily_limit(self):
         """
@@ -307,7 +317,7 @@ class TwelveDataMinuteDownloader:
         }
 
         try:
-            response = requests.get(self.base_url, params=params, timeout=15)
+            # Single request only (previously duplicated which doubled API usage)
             response = requests.get(self.base_url, params=params, timeout=20)
             response.raise_for_status()
             data = response.json()
@@ -338,6 +348,11 @@ class TwelveDataMinuteDownloader:
             df.to_parquet(cache_file)
             df.to_parquet(cache_file, compression='snappy')
             print(f"✅ Downloaded {len(df)} bars from Twelve Data for {ticker} on {date_str} ({timeframe_norm})")
+            # Update manifest with successful download
+            try:
+                self._update_manifest(ticker, date_str, timeframe_norm)
+            except Exception:
+                pass
             return df
 
         except DailyLimitExceededError as e:
@@ -346,6 +361,41 @@ class TwelveDataMinuteDownloader:
         except Exception as e:
             print(f"❌ Error downloading from Twelve Data for {ticker} on {date_str}: {e}")
             return None
+
+    def _update_manifest(self, ticker: str, date_str: str, timeframe_norm: str):
+        """Record a successful download in the manifest (thread-safe)."""
+        entry = {'ticker': ticker, 'date': date_str, 'timeframe': timeframe_norm}
+        with self._manifest_lock:
+            try:
+                if self._manifest_file.exists():
+                    with open(self._manifest_file, 'r') as f:
+                        data = json.load(f)
+                else:
+                    data = []
+            except Exception:
+                data = []
+
+            # Avoid duplicates
+            if entry not in data:
+                data.append(entry)
+                try:
+                    with open(self._manifest_file, 'w') as f:
+                        json.dump(data, f)
+                except Exception:
+                    pass
+
+    def list_downloaded(self, ticker: str = None):
+        """Return list of downloaded entries; filterable by ticker."""
+        with self._manifest_lock:
+            try:
+                with open(self._manifest_file, 'r') as f:
+                    data = json.load(f)
+            except Exception:
+                return []
+
+        if ticker:
+            return [d for d in data if d.get('ticker') == ticker]
+        return data
 
 
 def main():

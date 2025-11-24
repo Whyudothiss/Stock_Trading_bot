@@ -24,15 +24,21 @@ from data_processing.download_minute_data import AlpacaMinuteDownloader
 class BreakoutFeatureExtractor:
     """Extract features for breakout trades to predict 5R success"""
     
-    def __init__(self, timeframe: str = '1Min'):
+    def __init__(self, timeframe: str = '1Min', downloader=None):
         """
         Initialize extractor
-        
+
         Args:
             timeframe: '1Min' or '5Min' for intraday analysis
+            downloader: optional downloader instance (must provide `download_minute_data`)
+                        If None, defaults to `AlpacaMinuteDownloader()`.
         """
         self.timeframe = timeframe
-        self.minute_downloader = AlpacaMinuteDownloader()
+        # Allow injecting a custom downloader (TwelveData, Alpaca, or test stub)
+        if downloader is not None:
+            self.minute_downloader = downloader
+        else:
+            self.minute_downloader = AlpacaMinuteDownloader()
         
         # For daily data (pre-breakout consolidation)
         self.lookback_days = 10
