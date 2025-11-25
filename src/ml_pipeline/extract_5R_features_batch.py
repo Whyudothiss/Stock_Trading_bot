@@ -16,6 +16,7 @@ from datetime import datetime
 import time
 import pandas as pd
 import argparse
+import pytz
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -38,40 +39,41 @@ def load_trades(filepath):
     return trades
 
 
+def _normalize_entry_date(entry_date_str):
+    """Normalize entry date string to US/Eastern date 'YYYY-MM-DD'.
+
+    Handles timestamps in SGT with microsecond variations like
+    '2023-11-13T22:36:03.17+08:00' by converting to Eastern time and
+    returning the date string used when saving features.
+    """
+    try:
+        if 'T' in entry_date_str:
+            ts = entry_date_str.replace('+08:00', '')
+            if '.' in ts:
+                base, frac = ts.rsplit('.', 1)
+                frac = frac[:6].ljust(6, '0')
+                ts = f"{base}.{frac}"
+
+            dt_sgt = datetime.fromisoformat(ts)
+            sgt = pytz.timezone('Asia/Singapore')
+            dt_sgt = sgt.localize(dt_sgt)
+            eastern = pytz.timezone('US/Eastern')
+            dt_et = dt_sgt.astimezone(eastern)
+            return dt_et.strftime('%Y-%m-%d')
+        else:
+            return entry_date_str
+    except Exception:
+        # Fallback: return date portion if possible
+        return entry_date_str.split('T')[0] if 'T' in entry_date_str else entry_date_str
+
+
 def extract_features_for_trade(trade, extractor, timeframe):
     """Extract features for a single trade"""
     try:
         # Parse entry date (handle timezone if present)
         entry_date_str = trade['entry_date']
-        
-        # Convert from SGT (UTC+8) to US Eastern Time for correct date
-        if 'T' in entry_date_str:
-            # Parse full timestamp with timezone
-            from datetime import datetime
-            import pytz
-            import re
-            
-            # Normalize timestamp format (handle varying microsecond precision)
-            # 2023-11-13T22:36:03.17+08:00 -> 2023-11-13T22:36:03.170000+08:00
-            ts = entry_date_str.replace('+08:00', '')
-            if '.' in ts:
-                base, frac = ts.rsplit('.', 1)
-                frac = frac[:6].ljust(6, '0')  # Pad or truncate to 6 digits
-                ts = f"{base}.{frac}"
-            
-            # Parse the SGT timestamp
-            dt_sgt = datetime.fromisoformat(ts)
-            sgt = pytz.timezone('Asia/Singapore')
-            dt_sgt = sgt.localize(dt_sgt)
-            
-            # Convert to US Eastern Time
-            eastern = pytz.timezone('US/Eastern')
-            dt_et = dt_sgt.astimezone(eastern)
-            
-            # Use the ET date for data fetching
-            entry_date = dt_et.strftime('%Y-%m-%d')
-        else:
-            entry_date = entry_date_str
+        # Normalize using helper so resume checks match saved entry_date
+        entry_date = _normalize_entry_date(entry_date_str)
         
         # Extract features
         features = extractor.extract_features(
@@ -142,7 +144,7 @@ def process_batch(trades, timeframe, output_file):
         for i, trade in enumerate(trades, 1):
             # --- Check if trade is already processed ---
             # Normalize date for the check
-            entry_date_check = trade['entry_date'].split('T')[0]
+            entry_date_check = _normalize_entry_date(trade['entry_date'])
             if (trade['ticker'], entry_date_check) in processed_trades:
                 continue
             # -----------------------------------------
