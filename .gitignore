@@ -46,6 +46,9 @@ data/processed/*.jsonl
 
 # Ignore all CSV files
 *.csv
+data/processed/*.csv
+
+*.bak
 
 # Cache files (downloaded stock data)
 data/cache/
