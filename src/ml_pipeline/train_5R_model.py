@@ -205,6 +205,11 @@ def analyze_feature_importance(model, feature_cols, top_n=15):
     """Display top feature importances"""
     if hasattr(model, 'feature_importances_'):
         importances = model.feature_importances_
+
+        # Normalize LightGBM importances (which are split counts)
+        if isinstance(model, lgb.LGBMClassifier):
+            importances = importances / importances.sum()
+
         indices = np.argsort(importances)[::-1]
         
         print(f"\nTop {top_n} Most Important Features:")
@@ -239,6 +244,10 @@ def main():
     parser = argparse.ArgumentParser(description='Train 5R Predictor Model')
     parser.add_argument('--timeframe', type=str, required=True, choices=['1min', '5min'],
                         help='Timeframe to train on (1min or 5min)')
+    parser.add_argument('--features-file', type=str, default=None,
+                        help='Optional: path to features JSONL file (overrides timeframe-based default)')
+    parser.add_argument('--model-file', type=str, default=None,
+                        help='Optional: path to save trained model (overrides default name)')
     args = parser.parse_args()
     
     timeframe = args.timeframe
@@ -246,6 +255,9 @@ def main():
     # Paths
     project_root = Path(__file__).parent.parent.parent
     features_file = project_root / "data" / "processed" / f"features_5R_{timeframe}.jsonl"
+    # Allow overriding features file via CLI
+    if args.features_file:
+        features_file = Path(args.features_file)
     models_dir = project_root / "models"
     models_dir.mkdir(exist_ok=True)
     
@@ -271,11 +283,35 @@ def main():
     print(f"\nFeatures: {len(feature_cols)}")
     print(f"Samples: {len(X)}")
     
-    # Train-test split (80/20, stratified to maintain class distribution)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    
+    # Group-aware time split: use the last 20% of unique entry days as test set
+    # This keeps all entries from the same ticker+day together and preserves chronology.
+    print("\nPerforming group-aware time split (last 20% of days as test set)...")
+    df['entry_day'] = df['entry_date'].astype(str).str[:10]
+    unique_days = sorted(df['entry_day'].unique())
+    n_test_days = max(1, int(len(unique_days) * 0.20))
+    test_days = set(unique_days[-n_test_days:])
+
+    train_mask = ~df['entry_day'].isin(test_days)
+    test_mask = df['entry_day'].isin(test_days)
+
+    X_train = X[train_mask].reset_index(drop=True)
+    X_test = X[test_mask].reset_index(drop=True)
+    y_train = y[train_mask].reset_index(drop=True)
+    y_test = y[test_mask].reset_index(drop=True)
+
+    # If class distribution ends up with 0 positives in train or test (edge case), fall back to stratified split
+    if (y_train.sum() == 0) or (y_test.sum() == 0):
+        print("⚠️  Group-aware split produced empty positive class in train/test. Falling back to stratified random split.")
+        try:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=y
+            )
+        except Exception:
+            # As a last resort, do a random split without stratify
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=None
+            )
+
     print(f"\nTrain set: {len(X_train)} samples ({(y_train==1).sum()} positive)")
     print(f"Test set:  {len(X_test)} samples ({(y_test==1).sum()} positive)")
     
@@ -313,8 +349,13 @@ def main():
         marker = " ⭐ BEST" if name == best_name else ""
         print(f"{name:20s} ROC-AUC: {score:.4f}{marker}")
     
-    # Save best model
-    model_file = models_dir / f"5R_predictor_{timeframe}.pkl"
+    # Save best model (allow CLI override)
+    if args.model_file:
+        model_file = Path(args.model_file)
+        model_file.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        model_file = models_dir / f"5R_predictor_{timeframe}.pkl"
+
     joblib.dump(best_model, model_file)
     print(f"\n✅ Saved best model ({best_name}) to: {model_file}")
     
