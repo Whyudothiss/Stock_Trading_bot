@@ -44,5 +44,8 @@ results/scanners/*.json
 *.jsonl
 data/processed/*.jsonl
 
+# Ignore all CSV files
+*.csv
+
 # Cache files (downloaded stock data)
 data/cache/
