@@ -698,7 +698,7 @@ def main():
     """Run the simulation"""
     # Load all tickers with trades since January 2025
     tickers = []
-    with open('data/processed/tickers_since_jan.txt', 'r') as f:
+    with open('data/processed/unique_traded_jun1_oct31_2025.txt', 'r') as f:
         for line in f:
             ticker = line.strip()
             if ticker:
