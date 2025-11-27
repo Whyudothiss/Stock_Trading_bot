@@ -88,13 +88,31 @@ def td_get_daily(ticker: str, start_date: str, end_date: str, api_key: str = Non
         return pd.DataFrame()
 
     # Ensure canonical column names
+    # yfinance may return a MultiIndex columns (e.g., when multiple tickers are requested)
+    # Flatten to single level if needed so column selection returns Series, not DataFrame
+    if isinstance(df.columns, pd.MultiIndex):
+        try:
+            df.columns = df.columns.get_level_values(0)
+        except Exception:
+            # Fall back to stringifying column tuples
+            df.columns = ['_'.join(map(str, c)) for c in df.columns]
+
     df = df.rename(columns={
         'Adj Close': 'Close'
     })
 
     for c in ['Open', 'High', 'Low', 'Close', 'Volume']:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
+            # Ensure we operate on a 1D Series; if df[c] is a DataFrame, pick the first column
+            col = df[c]
+            if hasattr(col, 'shape') and getattr(col, 'ndim', 1) > 1:
+                # convert to first column
+                try:
+                    col = col.iloc[:, 0]
+                except Exception:
+                    # last resort: skip numeric conversion for this column
+                    continue
+            df[c] = pd.to_numeric(col, errors='coerce')
 
     # Normalize timezone to America/New_York
     try:
@@ -136,7 +154,8 @@ class OctNovSimulator:
         
         # Feature extractors
         self.consol_extractor = ConsolidationFeatureExtractor()
-        self.breakout_extractor = BreakoutFeatureExtractor(timeframe='5Min')
+        # Use the shared Twelve Data downloader (singleton) so we respect caching and rate limits
+        self.breakout_extractor = BreakoutFeatureExtractor(timeframe='5Min', downloader=_get_td_downloader())
         
         # Twelve Data API key (loaded lazily by helper functions)
         load_dotenv()
@@ -159,7 +178,7 @@ class OctNovSimulator:
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         self.last_completed_day = None
     
-    def get_trading_days(self, start_date='2025-01-02', end_date='2025-11-17'):
+    def get_trading_days(self, start_date='2025-10-01', end_date='2025-10-31'):
         """Get all trading days between start and end"""
         trading_days = []
         current = datetime.strptime(start_date, '%Y-%m-%d')
@@ -185,8 +204,14 @@ class OctNovSimulator:
                 if not features_dict:
                     return None
                 feature_values = [features_dict.get(f, 0) for f in self.pipeline1_features]
-                X = np.array([feature_values])
-                prob = self.pipeline1_model.predict_proba(X)[0][1]
+                # Build a DataFrame with column names to match training input
+                try:
+                    X_df = pd.DataFrame([feature_values], columns=self.pipeline1_features)
+                    prob = self.pipeline1_model.predict_proba(X_df)[0][1]
+                except Exception:
+                    # Fallback to numpy array if DataFrame fails
+                    X = np.array([feature_values])
+                    prob = self.pipeline1_model.predict_proba(X)[0][1]
                 if prob >= self.pipeline1_threshold:
                     return {
                         'ticker': ticker,
@@ -291,8 +316,12 @@ class OctNovSimulator:
                 return False, 0.0
             
             feature_values = [features_dict.get(f, 0) for f in self.pipeline2_features]
-            X = np.array([feature_values])
-            prob = self.pipeline2_model.predict_proba(X)[0][1]
+            try:
+                X_df = pd.DataFrame([feature_values], columns=self.pipeline2_features)
+                prob = self.pipeline2_model.predict_proba(X_df)[0][1]
+            except Exception:
+                X = np.array([feature_values])
+                prob = self.pipeline2_model.predict_proba(X)[0][1]
             
             return prob >= self.pipeline2_threshold, prob
             
@@ -729,9 +758,9 @@ def main():
     parser.add_argument('--reset-checkpoint', action='store_true', help='Delete existing checkpoint and start fresh')
     args = parser.parse_args()
 
-    # Load all tickers with trades since January 2025
+    # Load all tickers with trades since June 2025
     tickers = []
-    with open('data/processed/tickers_since_jan.txt', 'r') as f:
+    with open('data/processed/unique_traded_jun1_oct31_2025.txt', 'r') as f:
         for line in f:
             ticker = line.strip()
             if ticker:
