@@ -20,7 +20,20 @@ from dotenv import load_dotenv
 # Import feature extractors
 from ml_pipeline.consolidation_features import ConsolidationFeatureExtractor
 from ml_pipeline.breakout_features import BreakoutFeatureExtractor
-# TwelveData helpers will be used instead of yfinance
+from data_processing.download_minute_data import TwelveDataMinuteDownloader
+from pathlib import Path
+import threading
+
+# Module-level TwelveData downloader singleton (uses cache + rate limiting)
+_TD_DOWNLOADER_LOCK = threading.Lock()
+_TD_DOWNLOADER = None
+
+def _get_td_downloader():
+    global _TD_DOWNLOADER
+    with _TD_DOWNLOADER_LOCK:
+        if _TD_DOWNLOADER is None:
+            _TD_DOWNLOADER = TwelveDataMinuteDownloader()
+        return _TD_DOWNLOADER
 
 
 def td_get_intraday(ticker: str, date: str, api_key: str = None) -> pd.DataFrame:
@@ -28,55 +41,13 @@ def td_get_intraday(ticker: str, date: str, api_key: str = None) -> pd.DataFrame
 
     Returns DataFrame indexed by timezone-aware datetime (America/New_York) with columns Open/High/Low/Close/Volume.
     """
-    load_dotenv()
-    api_key = api_key or os.getenv('TWELVEDATA_API_KEY')
-    if not api_key:
-        print('Twelve Data API key missing (TWELVEDATA_API_KEY).')
+    # Use the shared downloader which handles rate limiting and caching
+    downloader = _get_td_downloader()
+    # downloader.download_minute_data returns a DataFrame or None
+    df = downloader.download_minute_data(ticker, date, timeframe='5min')
+    if df is None:
         return pd.DataFrame()
-
-    url = 'https://api.twelvedata.com/time_series'
-    params = {
-        'symbol': ticker,
-        'interval': '5min',
-        'start_date': f'{date} 09:30:00',
-        'end_date': f'{date} 16:00:00',
-        'apikey': api_key,
-        'timezone': 'America/New_York',
-        'format': 'JSON',
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        print(f'Error requesting Twelve Data intraday for {ticker} {date}: {e}')
-        return pd.DataFrame()
-
-    if not data or 'values' not in data:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(data['values'])
-    if df.empty:
-        return pd.DataFrame()
-
-    # TwelveData returns newest-first; reverse to chronological
-    df = df.iloc[::-1].copy()
-    for c in ['open', 'high', 'low', 'close', 'volume']:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-
-    if 'datetime' in df.columns:
-        df['datetime'] = pd.to_datetime(df['datetime'])
-        try:
-            df['datetime'] = df['datetime'].dt.tz_localize('America/New_York')
-        except Exception:
-            try:
-                df['datetime'] = df['datetime'].dt.tz_convert('America/New_York')
-            except Exception:
-                pass
-        df.set_index('datetime', inplace=True)
-
-    df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+    # Ensure canonical column names
     cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
     return df[cols]
 
@@ -86,7 +57,25 @@ def td_get_daily(ticker: str, start_date: str, end_date: str, api_key: str = Non
 
     Returns DataFrame with DateTime index (America/New_York) and Open/High/Low/Close/Volume.
     """
-    load_dotenv()
+    # For daily bars we use the downloader's rate limiting + a simple daily cache
+    downloader = _get_td_downloader()
+    cache_dir = Path('data/cache/twelvedata_daily')
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"{ticker}_{start_date}_{end_date}.parquet"
+    if cache_file.exists():
+        try:
+            return pd.read_parquet(cache_file)
+        except Exception:
+            pass
+
+    # Use downloader's rate limit helpers to account for daily call quota
+    try:
+        downloader._check_and_update_daily_limit()
+        downloader._enforce_rate_limit()
+    except Exception as e:
+        print(f"Twelve Data rate/daily limit error: {e}")
+        return pd.DataFrame()
+
     api_key = api_key or os.getenv('TWELVEDATA_API_KEY')
     if not api_key:
         print('Twelve Data API key missing (TWELVEDATA_API_KEY).')
@@ -128,7 +117,12 @@ def td_get_daily(ticker: str, start_date: str, end_date: str, api_key: str = Non
 
     df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
     cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
-    return df[cols]
+    out = df[cols]
+    try:
+        out.to_parquet(cache_file)
+    except Exception:
+        pass
+    return out
 
 
 class OctNovSimulator:
@@ -157,7 +151,7 @@ class OctNovSimulator:
         
         # Thresholds
         self.pipeline1_threshold = 0.70
-        self.pipeline2_threshold = 0.45
+        self.pipeline2_threshold = 0.17
         
         # Capital management
         self.starting_cash = starting_cash
