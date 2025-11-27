@@ -16,6 +16,7 @@ import os
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+import yfinance as yf
 
 # Import feature extractors
 from ml_pipeline.consolidation_features import ConsolidationFeatureExtractor
@@ -57,8 +58,7 @@ def td_get_daily(ticker: str, start_date: str, end_date: str, api_key: str = Non
 
     Returns DataFrame with DateTime index (America/New_York) and Open/High/Low/Close/Volume.
     """
-    # For daily bars we use the downloader's rate limiting + a simple daily cache
-    downloader = _get_td_downloader()
+    # Use yfinance for daily bars (lighter, avoids Twelve Data daily quota)
     cache_dir = Path('data/cache/twelvedata_daily')
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / f"{ticker}_{start_date}_{end_date}.parquet"
@@ -68,56 +68,48 @@ def td_get_daily(ticker: str, start_date: str, end_date: str, api_key: str = Non
         except Exception:
             pass
 
-    # Use downloader's rate limit helpers to account for daily call quota
+    # yfinance end date is exclusive, so add one day to include `end_date`
     try:
-        downloader._check_and_update_daily_limit()
-        downloader._enforce_rate_limit()
-    except Exception as e:
-        print(f"Twelve Data rate/daily limit error: {e}")
-        return pd.DataFrame()
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+        end_plus = end_dt.strftime('%Y-%m-%d')
+    except Exception:
+        # fall back to using provided strings
+        end_plus = end_date
 
-    api_key = api_key or os.getenv('TWELVEDATA_API_KEY')
-    if not api_key:
-        print('Twelve Data API key missing (TWELVEDATA_API_KEY).')
-        return pd.DataFrame()
-
-    url = 'https://api.twelvedata.com/time_series'
-    params = {
-        'symbol': ticker,
-        'interval': '1day',
-        'start_date': f'{start_date}',
-        'end_date': f'{end_date}',
-        'apikey': api_key,
-        'timezone': 'America/New_York',
-        'format': 'JSON',
-    }
     try:
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        df = yf.download(ticker, start=start_date, end=end_plus, interval='1d', progress=False, auto_adjust=False)
     except Exception as e:
-        print(f'Error requesting Twelve Data daily for {ticker}: {e}')
+        print(f'Error fetching daily data from yfinance for {ticker}: {e}')
         return pd.DataFrame()
 
-    if not data or 'values' not in data:
+    if df is None or df.empty:
         return pd.DataFrame()
 
-    df = pd.DataFrame(data['values'])
-    if df.empty:
-        return pd.DataFrame()
+    # Ensure canonical column names
+    df = df.rename(columns={
+        'Adj Close': 'Close'
+    })
 
-    df = df.iloc[::-1].copy()
-    for c in ['open', 'high', 'low', 'close', 'volume']:
+    for c in ['Open', 'High', 'Low', 'Close', 'Volume']:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    if 'datetime' in df.columns:
-        df['datetime'] = pd.to_datetime(df['datetime']).dt.tz_localize('America/New_York')
-        df.set_index('datetime', inplace=True)
+    # Normalize timezone to America/New_York
+    try:
+        if df.index.tz is None:
+            # yfinance often returns UTC-naive dates; localize to UTC then convert
+            try:
+                df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
+            except Exception:
+                df.index = df.index.tz_localize('America/New_York')
+        else:
+            df.index = df.index.tz_convert('America/New_York')
+    except Exception:
+        pass
 
-    df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
     cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
-    out = df[cols]
+    out = df[cols].copy()
     try:
         out.to_parquet(cache_file)
     except Exception:
