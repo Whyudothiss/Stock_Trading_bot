@@ -17,6 +17,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 import yfinance as yf
+import argparse
 
 # Import feature extractors
 from ml_pipeline.consolidation_features import ConsolidationFeatureExtractor
@@ -153,6 +154,10 @@ class OctNovSimulator:
         # Track trades
         self.trades = []
         self.positions = []
+        # Checkpointing
+        self.checkpoint_path = Path('data/cache/octnov_sim_checkpoint.pkl')
+        self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        self.last_completed_day = None
     
     def get_trading_days(self, start_date='2025-01-02', end_date='2025-11-17'):
         """Get all trading days between start and end"""
@@ -406,9 +411,24 @@ class OctNovSimulator:
         
         return max(shares, 0)
     
-    def run_simulation(self, tickers):
+    def run_simulation(self, tickers, start_from_date: str = None):
         """Run Oct-Nov 2025 simulation"""
         trading_days = self.get_trading_days()
+        # If resuming from a particular date (exclusive), slice trading_days accordingly
+        if start_from_date:
+            try:
+                # accept string dates like '2025-08-01'
+                start_from_dt = datetime.strptime(start_from_date, '%Y-%m-%d')
+                # find first trading day strictly after start_from_date
+                idx = 0
+                for i, d in enumerate(trading_days):
+                    d_dt = datetime.strptime(d, '%Y-%m-%d')
+                    if d_dt > start_from_dt:
+                        idx = i
+                        break
+                trading_days = trading_days[idx:]
+            except Exception:
+                pass
         active_positions = []
         entered_tickers_this_month = set()  # Track tickers entered during the entire month
 
@@ -660,6 +680,14 @@ class OctNovSimulator:
                         break  # Move to next stock after entering
         
         # Final results
+            # Save checkpoint at end of each day so we can resume if interrupted
+            try:
+                self.last_completed_day = date
+                joblib.dump(self, self.checkpoint_path)
+                print(f"   [Checkpoint] Saved checkpoint for {date} -> {self.checkpoint_path}")
+            except Exception as e:
+                print(f"⚠️ Failed to write checkpoint: {e}")
+
         self.print_results()
     
     def print_results(self):
@@ -695,10 +723,15 @@ class OctNovSimulator:
 
 
 def main():
-    """Run the simulation"""
+    """Run the simulation with optional resume support"""
+    parser = argparse.ArgumentParser(description='Run Oct-Nov simulator')
+    parser.add_argument('--resume', action='store_true', help='Resume from last checkpoint if present')
+    parser.add_argument('--reset-checkpoint', action='store_true', help='Delete existing checkpoint and start fresh')
+    args = parser.parse_args()
+
     # Load all tickers with trades since January 2025
     tickers = []
-    with open('data/processed/unique_traded_jun1_oct31_2025.txt', 'r') as f:
+    with open('data/processed/tickers_since_jan.txt', 'r') as f:
         for line in f:
             ticker = line.strip()
             if ticker:
@@ -707,9 +740,33 @@ def main():
     print(f"Loaded {len(tickers)} tickers with trades since January 2025")
     print("Priority sorting enabled: highest Pipeline 1 probabilities evaluated first")
 
-    # Run simulation
-    scanner = OctNovSimulator(starting_cash=30000)
-    scanner.run_simulation(tickers)
+    checkpoint_path = Path('data/cache/octnov_sim_checkpoint.pkl')
+    if args.reset_checkpoint and checkpoint_path.exists():
+        try:
+            checkpoint_path.unlink()
+            print(f"Removed checkpoint: {checkpoint_path}")
+        except Exception as e:
+            print(f"Could not remove checkpoint: {e}")
+
+    if args.resume and checkpoint_path.exists():
+        try:
+            print(f"Resuming from checkpoint: {checkpoint_path}")
+            sim = joblib.load(checkpoint_path)
+            # Determine the resume start date (start after last_completed_day)
+            start_from = getattr(sim, 'last_completed_day', None)
+            if start_from is None:
+                print("Checkpoint present but last completed day not recorded; resuming from beginning")
+                sim.run_simulation(tickers)
+            else:
+                print(f"Resuming simulation from the day after {start_from}")
+                sim.run_simulation(tickers, start_from_date=start_from)
+            return
+        except Exception as e:
+            print(f"Failed to load checkpoint: {e}")
+
+    # No resume: start fresh
+    sim = OctNovSimulator(starting_cash=30000)
+    sim.run_simulation(tickers)
 
 
 if __name__ == '__main__':
