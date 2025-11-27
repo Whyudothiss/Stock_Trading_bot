@@ -138,7 +138,7 @@ class OctNovSimulator:
         # Load models
         print("Loading models...")
         pipeline1_data = joblib.load('models/consolidation_detector.pkl')
-        pipeline2_model = joblib.load('models/5R_predictor_5min.pkl')
+        pipeline2_model = joblib.load('models/5R_predictor_5min_twelve.pkl')
         
         self.pipeline1_model = pipeline1_data['model']
         self.pipeline1_features = pipeline1_data['feature_names']
