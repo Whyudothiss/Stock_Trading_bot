@@ -120,10 +120,26 @@ class BreakoutFeatureExtractor:
             if df.empty:
                 return None
             
-            # Flatten MultiIndex if present
+            # Ensure canonical column names and flatten MultiIndex if present
             if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            
+                try:
+                    df.columns = df.columns.get_level_values(0)
+                except Exception:
+                    df.columns = ['_'.join(map(str, c)) for c in df.columns]
+
+            df = df.rename(columns={'Adj Close': 'Close'})
+
+            # Coerce OHLCV columns to numeric Series (handle unexpected 2D shapes)
+            for c in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                if c in df.columns:
+                    col = df[c]
+                    if getattr(col, 'ndim', 1) > 1:
+                        try:
+                            col = col.iloc[:, 0]
+                        except Exception:
+                            continue
+                    df[c] = pd.to_numeric(col, errors='coerce')
+
             return df
             
         except Exception as e:
