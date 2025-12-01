@@ -13,11 +13,14 @@ import numpy as np
 from datetime import datetime, timedelta
 import json
 import os
+import csv
 import pandas as pd
 import requests
 from dotenv import load_dotenv
 import yfinance as yf
 import argparse
+import uuid
+from datetime import timezone
 
 # Import feature extractors
 from ml_pipeline.consolidation_features import ConsolidationFeatureExtractor
@@ -136,6 +139,30 @@ def td_get_daily(ticker: str, start_date: str, end_date: str, api_key: str = Non
     return out
 
 
+def _ensure_1d_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """Return a 1-D numeric Series for column `col` from `df`.
+
+    If `df[col]` is a DataFrame (e.g., MultiIndex or multiple tickers), pick the first column.
+    Coerce to numeric and return.
+    """
+    if col not in df.columns:
+        return pd.Series(dtype=float)
+
+    col_obj = df[col]
+    # If it's a DataFrame (multi-column), pick the first column
+    if isinstance(col_obj, pd.DataFrame):
+        try:
+            s = col_obj.iloc[:, 0]
+        except Exception:
+            # Fall back to taking the first element per row
+            s = col_obj.apply(lambda row: row.iloc[0], axis=1)
+    else:
+        s = col_obj
+
+    s = pd.to_numeric(s, errors='coerce')
+    return s
+
+
 class OctNovSimulator:
     """Simulate Oct-Nov 2025 with yfinance data"""
     
@@ -177,6 +204,126 @@ class OctNovSimulator:
         self.checkpoint_path = Path('data/cache/octnov_sim_checkpoint.pkl')
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         self.last_completed_day = None
+
+    def _serializable_state(self):
+        """Return a JSON/joblib-serializable dict representing simulator state.
+
+        Excludes non-serializable objects like downloader locks, models, thread locks,
+        and feature extractor instances.
+        """
+        return {
+            'starting_cash': self.starting_cash,
+            'cash': self.cash,
+            'risk_per_trade_pct': self.risk_per_trade_pct,
+            'trades': self.trades,
+            'positions': self.positions,
+            'last_completed_day': self.last_completed_day,
+            'pipeline1_threshold': self.pipeline1_threshold,
+            'pipeline2_threshold': self.pipeline2_threshold
+        }
+
+    def save_checkpoint(self):
+        """Save only the serializable state to avoid pickling locks or downloader objects."""
+        try:
+            state = self._serializable_state()
+            joblib.dump(state, self.checkpoint_path)
+            print(f"   [Checkpoint] Saved checkpoint for {self.last_completed_day} -> {self.checkpoint_path}")
+            return True
+        except Exception as e:
+            print(f"⚠️ Failed to write checkpoint: {e}")
+            return False
+    
+    def write_daily_pipeline_log(self, date: str, p1_passers, p2_passers, selected):
+        """Append a CSV row with lists of tickers that passed Pipeline1 and Pipeline2 and selected breakouts.
+
+        CSV columns: run_id, timestamp_utc, date, pipeline1_passers, pipeline2_passers, selected_breakouts
+        Lists are joined by semicolons. `p2_passers` may be a dict ticker->prob.
+        """
+        try:
+            out_dir = Path('results')
+            out_dir.mkdir(parents=True, exist_ok=True)
+            log_path = out_dir / 'pipeline_daily_passes.csv'
+            header = ['run_id', 'timestamp_utc', 'date', 'pipeline1_passers', 'pipeline2_passers', 'selected_breakouts']
+            write_header = not log_path.exists()
+            with open(log_path, 'a', newline='') as fh:
+                writer = csv.writer(fh)
+                if write_header:
+                    writer.writerow(header)
+
+                # selected may be list of (ticker, prob) tuples or simple tickers
+                def fmt_selected(sel):
+                    out = []
+                    for s in sel:
+                        if isinstance(s, (list, tuple)) and len(s) >= 2:
+                            try:
+                                out.append(f"{s[0]}:{float(s[1]):.4f}")
+                            except Exception:
+                                out.append(f"{s[0]}:{s[1]}")
+                        else:
+                            out.append(str(s))
+                    return ';'.join(sorted(out))
+
+                # p2_passers may be dict ticker->prob; turn into ticker:prob strings
+                if isinstance(p2_passers, dict):
+                    p2_list = []
+                    for k, v in p2_passers.items():
+                        try:
+                            p2_list.append(f"{k}:{float(v):.4f}")
+                        except Exception:
+                            p2_list.append(f"{k}:{v}")
+                    p2_field = ';'.join(sorted(p2_list))
+                else:
+                    p2_field = ';'.join(sorted(p2_passers)) if p2_passers else ''
+
+                row = [
+                    getattr(self, '_current_run_id', ''),
+                    datetime.now(timezone.utc).isoformat(),
+                    date,
+                    ';'.join(sorted(p1_passers)) if p1_passers else '',
+                    p2_field,
+                    fmt_selected(selected) if selected else ''
+                ]
+                writer.writerow(row)
+        except Exception as e:
+            print(f"⚠️ Failed to write pipeline daily log: {e}")
+
+    def write_daily_candidates_json(self, date: str, run_id: str, candidates, selected):
+        """Write a JSON file containing full candidate details for the day.
+
+        File: results/pipeline_candidates_{date}_{run_id}.json
+        """
+        try:
+            out_dir = Path('results')
+            out_dir.mkdir(parents=True, exist_ok=True)
+            fname = out_dir / f'pipeline_candidates_{date}_{run_id}.json'
+            # mark selected in candidate list
+            sel_set = set([s[0] if isinstance(s, (list, tuple)) else s for s in selected])
+            dump_list = []
+            for c in candidates:
+                try:
+                    d = {
+                        'ticker': str(c.get('ticker')),
+                        'p2_prob': float(c.get('p2_prob')) if c.get('p2_prob') is not None else None,
+                        'entry': float(c.get('entry')) if c.get('entry') is not None else None,
+                        'stop': float(c.get('stop')) if c.get('stop') is not None else None,
+                        'trigger': float(c.get('trigger')) if c.get('trigger') is not None else None,
+                        'time': c.get('time').isoformat() if hasattr(c.get('time'), 'isoformat') else (str(c.get('time')) if c.get('time') is not None else None),
+                        'selected': c.get('ticker') in sel_set
+                    }
+                except Exception:
+                    d = {k: (str(v) if v is not None else None) for k, v in (c.items() if isinstance(c, dict) else [])}
+                    d['selected'] = d.get('ticker') in sel_set
+                dump_list.append(d)
+
+            # write atomically
+            tmp = fname.with_suffix('.tmp')
+            with open(tmp, 'w') as fh:
+                json.dump(dump_list, fh, indent=2)
+            tmp.replace(fname)
+        except Exception as e:
+            print(f"⚠️ Failed to write pipeline candidates JSON: {e}")
+
+    
     
     def get_trading_days(self, start_date='2025-10-01', end_date='2025-10-31'):
         """Get all trading days between start and end"""
@@ -333,18 +480,17 @@ class OctNovSimulator:
         try:
             if intraday_data is None or intraday_data.empty:
                 return None  # Hold position
-            
+
             current_stop = position['stop_price']
             hit_5R = position['hit_5R']
             position_size = position['position_size']
             partial_exits = position.get('partial_exits', [])  # Carry forward from previous days
-            
+
             # Recalculate total_exit_price from all previous partial exits
             total_exit_price = sum(exit['price'] * exit['size'] for exit in partial_exits)
-            
-            # Check each 5-min bar
+
+            # First: handle intraday target (5R) partial exits as before
             for idx, row in intraday_data.iterrows():
-                # Check if hit 5R target
                 if not hit_5R and position_size == 1.0 and row['High'] >= position['target_price']:
                     # Take 20% profit at 5R
                     partial_exits.append({
@@ -358,57 +504,72 @@ class OctNovSimulator:
                     # Move stop to breakeven (entry price)
                     current_stop = position['entry_price']
                     hit_5R = True
-                    continue
-                
-                # Check stop loss (with 0.5% slippage)
-                if row['Low'] <= current_stop:
-                    exit_price_with_slippage = current_stop * 0.995
+
+            # After intraday checks, use daily data (yfinance) to determine stop or SMA exit
+            # daily_data should include today's bar as the last row
+            if daily_data is None or daily_data.empty:
+                return {
+                    'exited': False,
+                    'position_size': position_size,
+                    'stop_price': current_stop,
+                    'hit_5R': hit_5R,
+                    'partial_exits': partial_exits
+                }
+
+            # Ensure we have 1D series for Low/Close
+            low_series = _ensure_1d_series(daily_data, 'Low')
+            close_series = _ensure_1d_series(daily_data, 'Close')
+
+            try:
+                today_low = float(low_series.iloc[-1])
+            except Exception:
+                today_low = float('nan')
+            try:
+                today_close = float(close_series.iloc[-1])
+            except Exception:
+                today_close = float('nan')
+
+            # Check stop using daily low (with slippage applied at exit)
+            if pd.notna(today_low) and today_low <= current_stop and position_size > 0:
+                exit_price_with_slippage = current_stop * 0.995
+                partial_exits.append({
+                    'time': daily_data.index[-1],
+                    'price': exit_price_with_slippage,
+                    'size': position_size,
+                    'reason': 'STOPPED_OUT'
+                })
+                total_exit_price += exit_price_with_slippage * position_size
+                position_size = 0
+
+            # If not stopped, check SMA10 using daily_data
+            elif 'SMA10' in daily_data.columns and position_size > 0:
+                try:
+                    current_sma = float(daily_data['SMA10'].iloc[-1])
+                except Exception:
+                    current_sma = float('nan')
+                if pd.notna(current_sma) and pd.notna(today_close) and today_close < current_sma:
+                    # Exit at close price (no intraday check)
                     partial_exits.append({
-                        'time': idx,
-                        'price': exit_price_with_slippage,
+                        'time': daily_data.index[-1],
+                        'price': today_close,
                         'size': position_size,
-                        'reason': 'STOPPED_OUT'
+                        'reason': 'BELOW_10SMA'
                     })
-                    total_exit_price += exit_price_with_slippage * position_size
+                    total_exit_price += today_close * position_size
                     position_size = 0
-                    break
-                
-                # Check 3:50 PM 10 SMA exit
-                time_str = idx.strftime('%H:%M')
-                if time_str == '15:50' and position_size > 0:
-                    # Check if 3:50 PM close < 10 SMA
-                    if len(daily_data) >= 11 and 'SMA10' in daily_data.columns:
-                        current_sma = daily_data['SMA10'].iloc[-1]
-                        if pd.notna(current_sma) and row['Close'] < current_sma:
-                            # Exit at next candle (3:55 PM) open
-                            next_candles = intraday_data.loc[idx:].iloc[1:]
-                            if len(next_candles) > 0:
-                                next_candle = next_candles.iloc[0]
-                                exit_price = next_candle['Open']
-                                partial_exits.append({
-                                    'time': next_candles.index[0],
-                                    'price': exit_price,
-                                    'size': position_size,
-                                    'reason': 'BELOW_10SMA'
-                                })
-                                total_exit_price += exit_price * position_size
-                                position_size = 0
-                                break
-            
+
             # If fully exited
             if position_size == 0:
-                # total_exit_price is already the weighted average (sum of price * size)
-                # where size fractions sum to 1.0
                 avg_exit_price = total_exit_price
                 return {
                     'exited': True,
                     'exit_price': avg_exit_price,
-                    'exit_time': partial_exits[-1]['time'],
-                    'reason': partial_exits[-1]['reason'],
+                    'exit_time': partial_exits[-1]['time'] if partial_exits else daily_data.index[-1],
+                    'reason': partial_exits[-1]['reason'] if partial_exits else 'EXIT',
                     'partial_exits': partial_exits
                 }
-            
-            # Update position for next day
+
+            # Otherwise hold and return updated position state
             return {
                 'exited': False,
                 'position_size': position_size,
@@ -416,8 +577,8 @@ class OctNovSimulator:
                 'hit_5R': hit_5R,
                 'partial_exits': partial_exits
             }
-            
-        except Exception as e:
+
+        except Exception:
             return None
     
     def calculate_position_size(self, entry_price, stop_price):
@@ -425,24 +586,31 @@ class OctNovSimulator:
         risk_per_share = abs(entry_price - stop_price)
         if risk_per_share == 0:
             return 0
-        
-        # Risk should be based on STARTING capital, not remaining cash
+
+        # Risk should be based on STARTING capital
         dollar_risk = self.starting_cash * (self.risk_per_trade_pct / 100.0)
-        shares = int(dollar_risk / risk_per_share)
-        
-        # Cap by available cash WITHOUT changing risk-based sizing
+
+        # Account for stop slippage when sizing so realized loss does not exceed dollar_risk
+        slippage_factor = 1.005  # account for 0.5% slippage on stop
+        effective_risk_per_share = risk_per_share * slippage_factor
+
+        shares = int(dollar_risk / effective_risk_per_share)
+
+        # Cap by available cash
         max_shares = int(self.cash / entry_price)
         shares = min(shares, max_shares)
-        
-        # If we don't have enough cash for even the risk-based position, skip trade
-        if shares < int(dollar_risk / risk_per_share) * 0.5:  # Less than 50% of intended size
+
+        # If no shares affordable, skip
+        if shares <= 0:
             return 0
-        
-        return max(shares, 0)
+
+        return shares
     
     def run_simulation(self, tickers, start_from_date: str = None):
         """Run Oct-Nov 2025 simulation"""
         trading_days = self.get_trading_days()
+        # Unique id for this run (used in logs)
+        self._current_run_id = uuid.uuid4().hex
         # If resuming from a particular date (exclusive), slice trading_days accordingly
         if start_from_date:
             try:
@@ -492,40 +660,19 @@ class OctNovSimulator:
                     
                     # Check if yesterday closed below 10 SMA
                     if len(daily_data) >= 11:
-                        daily_data['SMA10'] = daily_data['Close'].rolling(10).mean()
+                        close_series = _ensure_1d_series(daily_data, 'Close')
+                        daily_data['SMA10'] = close_series.rolling(10).mean()
                         # Yesterday is the last bar in daily_data (download end date excludes today)
-                        yesterday_close = daily_data['Close'].iloc[-1].item()
-                        yesterday_sma = daily_data['SMA10'].iloc[-1].item()
+                        try:
+                            yesterday_close = float(close_series.iloc[-1])
+                        except Exception:
+                            yesterday_close = float('nan')
+                        try:
+                            yesterday_sma = float(daily_data['SMA10'].iloc[-1])
+                        except Exception:
+                            yesterday_sma = float('nan')
                         
-                        if pd.notna(yesterday_sma) and yesterday_close < yesterday_sma:
-                            # Exit at today's open
-                            intraday_data = td_get_intraday(ticker, date, api_key=self.td_api_key)
-                            if intraday_data is not None and len(intraday_data) > 0:
-                                exit_price = intraday_data['Open'].iloc[0]
-                                cost = position['shares'] * position['entry_price']
-                                proceeds = position['shares'] * exit_price
-                                pnl = proceeds - cost
-                                pnl_pct = (pnl / cost) * 100
-                                self.cash += pnl
-                                
-                                print(f"      ✅ {ticker}: ${position['entry_price']:.2f} → ${exit_price:.2f}")
-                                print(f"         P&L: ${pnl:,.0f} ({pnl_pct:+.1f}%) | BELOW_10SMA")
-                                
-                                self.trades.append({
-                                    'date': position['entry_date'],
-                                    'time': position['entry_time'],
-                                    'exit_date': date,
-                                    'exit_time': '09:30',
-                                    'ticker': ticker,
-                                    'entry': position['entry_price'],
-                                    'exit': exit_price,
-                                    'shares': position['shares'],
-                                    'pnl': pnl,
-                                    'pnl_pct': pnl_pct,
-                                    'outcome': 'BELOW_10SMA',
-                                    'p2_prob': position['p2_prob']
-                                })
-                                continue
+                        # (Removed redundant pre-intraday SMA close — end-of-day logic already handles closes below SMA)
                     
                     # Get intraday data for regular position management
                     intraday_data = td_get_intraday(ticker, date, api_key=self.td_api_key)
@@ -534,11 +681,12 @@ class OctNovSimulator:
                     
                     if result and result['exited']:
                         # Position closed
-                        cost = position['shares'] * position['entry_price']
+                        cost = position.get('cost', position['shares'] * position['entry_price'])
                         proceeds = position['shares'] * result['exit_price']
                         pnl = proceeds - cost
                         pnl_pct = (pnl / cost) * 100
-                        self.cash += pnl
+                        # Add full proceeds back to cash (cost deducted at entry)
+                        self.cash += proceeds
                         
                         print(f"      ✅ {ticker}: ${position['entry_price']:.2f} → ${result['exit_price']:.2f}")
                         print(f"         P&L: ${pnl:,.0f} ({pnl_pct:+.1f}%) | {result['reason']}")
@@ -557,6 +705,19 @@ class OctNovSimulator:
                             'outcome': result['reason'],
                             'p2_prob': position['p2_prob']
                         })
+                        # Update persisted open position (if present)
+                        try:
+                            for p in self.positions:
+                                if p.get('ticker') == ticker and p.get('status') == 'open' and float(p.get('entry_price')) == float(position['entry_price']):
+                                    p['status'] = 'closed'
+                                    p['exit_date'] = date
+                                    p['exit_time'] = result['exit_time'].strftime('%H:%M') if hasattr(result['exit_time'], 'strftime') else result.get('exit_time')
+                                    p['exit_price'] = result['exit_price']
+                                    p['pnl'] = pnl
+                                    p['pnl_pct'] = pnl_pct
+                                    break
+                        except Exception:
+                            pass
                     elif result and not result['exited']:
                         # Update position and hold
                         position['position_size'] = result['position_size']
@@ -605,78 +766,135 @@ class OctNovSimulator:
             # This ensures we prioritize the best setups when we hit the 3-trade limit
             watchlist = sorted(watchlist, key=lambda x: x['prob'], reverse=True)
             
-            # Get intraday data for all watchlist stocks
+            # Get intraday data for all tickers in the watchlist (only these are flagged by Pipeline1)
+            # We will scan each flagged ticker for a Pipeline2 pass and record the first breakout details.
+            candidates = []  # will hold dicts with breakout entry info and p2 prob
+            p2_passers = {}  # ticker -> highest p2 prob observed during scanning
+
             for stock in watchlist:
                 ticker = stock['ticker']
-                prev_day_high = prev_day_data.get(ticker, stock['consol_high'])
-                
-                # Download 5-min data for this day (Twelve Data)
+                prev_day_high = prev_day_data.get(ticker, stock.get('consol_high'))
+
                 intraday_data = td_get_intraday(ticker, date, api_key=self.td_api_key)
                 if intraday_data is None or len(intraday_data) == 0:
                     continue
-                
-                # Iterate through each 5-min bar
+
+                hot = None
+                breakout_info = None
+
+                # Iterate bars to build hot (pipeline2 pass) and detect breakout
                 for bar_idx, (timestamp, row) in enumerate(intraday_data.iterrows()):
-                    if trades_entered_today >= max_trades_per_day:
-                        break
-                    
                     # Calculate hypothetical entry as high-of-day so far
                     high_so_far = intraday_data.loc[:timestamp, 'High'].max()
-                    # Stop loss: low from start of day up to current bar (entry bar)
                     low_so_far = intraday_data.loc[:timestamp, 'Low'].min()
-                    
-                    # Hypothetical entry = high_so_far + 0.5% slippage
+
                     hypothetical_entry = high_so_far * 1.005
                     hypothetical_stop = low_so_far
                     risk = hypothetical_entry - hypothetical_stop
-                    
                     if risk <= 0:
                         continue
-                    
                     hypothetical_target = hypothetical_entry + 5 * risk
-                    
-                    # Evaluate Pipeline 2 with hypothetical prices
+
+                    # Evaluate Pipeline 2 only for tickers flagged by Pipeline1
                     passed, prob = self.check_pipeline2(
-                        ticker, date,
-                        hypothetical_entry,
-                        hypothetical_stop,
-                        hypothetical_target
+                        ticker, date, hypothetical_entry, hypothetical_stop, hypothetical_target
                     )
-                    
-                    # Update hot list
+
                     if passed and prob >= self.pipeline2_threshold:
-                        hot_list[ticker] = {
-                            'prob': prob,
-                            'time': timestamp,
-                            'trigger': high_so_far,
-                            'entry': hypothetical_entry,
-                            'stop': hypothetical_stop,
-                            'target': hypothetical_target
-                        }
-                    
-                    # Check if actual breakout happened (price broke trigger)
-                    if ticker in hot_list and row['High'] > hot_list[ticker]['trigger']:
-                        # Check if already entered this ticker today or this month
-                        if ticker in entered_tickers_today:
-                            continue  # Skip - already entered today
-                        if ticker in entered_tickers_this_month:
-                            continue  # Skip - already entered this month
-                        
-                        # BREAKOUT! Recalculate entry/stop with current candle included
+                        # store the hot pre-screen info (keep highest prob seen before breakout)
+                        if hot is None or prob > hot['prob']:
+                            hot = {
+                                'prob': prob,
+                                'time': timestamp,
+                                'trigger': high_so_far,
+                                'entry': hypothetical_entry,
+                                'stop': hypothetical_stop,
+                                'target': hypothetical_target
+                            }
+                        # record that this ticker passed Pipeline2 at least once (track max prob)
+                        try:
+                            p2_passers[ticker] = max(p2_passers.get(ticker, 0.0), prob)
+                        except Exception:
+                            p2_passers[ticker] = prob
+
+                    # If we have a hot pre-screen and the price breaks the trigger, record breakout
+                    if hot is not None and row['High'] > hot['trigger']:
+                        # Save breakout info (earliest breakout with the hot pre-screen)
                         current_high = intraday_data.loc[:timestamp, 'High'].max()
                         current_low = intraday_data.loc[:timestamp, 'Low'].min()
                         entry_price = current_high * 1.005
                         stop_price = current_low
-                        risk = entry_price - stop_price
-                        target_price = entry_price + 5 * risk
-                        prob = hot_list[ticker]['prob']
-                        
-                        shares = self.calculate_position_size(entry_price, stop_price)
-                        if shares == 0:
-                            continue
-                        
-                        # Create position
-                        position = {
+                        target_price = entry_price + 5 * (entry_price - stop_price)
+
+                        breakout_info = {
+                            'ticker': ticker,
+                            'entry_time': timestamp,
+                            'entry_price': entry_price,
+                            'stop_price': stop_price,
+                            'target_price': target_price,
+                            'p2_prob': hot['prob'],
+                            'trigger': hot['trigger']
+                        }
+                        break
+
+                if breakout_info:
+                    candidates.append(breakout_info)
+
+            # If we found candidate breakouts, select top N by Pipeline2 probability
+            if not candidates:
+                print('   No Pipeline2 candidates found for flagged tickers')
+            else:
+                # sort by p2_prob descending
+                candidates = sorted(candidates, key=lambda x: x['p2_prob'], reverse=True)
+                to_enter = candidates[:max_trades_per_day]
+
+                for info in to_enter:
+                    if trades_entered_today >= max_trades_per_day:
+                        break
+                    ticker = info['ticker']
+                    # Skip if already entered today or this month
+                    if ticker in entered_tickers_today or ticker in entered_tickers_this_month:
+                        continue
+
+                    entry_price = info['entry_price']
+                    stop_price = info['stop_price']
+                    target_price = info['target_price']
+                    prob = info['p2_prob']
+                    timestamp = info['entry_time']
+
+                    shares = self.calculate_position_size(entry_price, stop_price)
+                    if shares == 0:
+                        continue
+
+                    cost = shares * entry_price
+                    if cost > self.cash:
+                        continue
+
+                    position = {
+                        'ticker': ticker,
+                        'entry_date': date,
+                        'entry_time': timestamp.strftime('%H:%M'),
+                        'entry_price': entry_price,
+                        'stop_price': stop_price,
+                        'target_price': target_price,
+                        'shares': shares,
+                        'position_size': 1.0,
+                        'hit_5R': False,
+                        'p2_prob': prob,
+                        'partial_exits': []
+                    }
+
+                    # Deduct cash at entry and record cost
+                    self.cash -= cost
+                    position['cost'] = cost
+                    active_positions.append(position)
+                    trades_entered_today += 1
+                    entered_tickers_today.add(ticker)
+                    entered_tickers_this_month.add(ticker)
+
+                    # Persist a lightweight record of the open position for auditing
+                    try:
+                        self.positions.append({
                             'ticker': ticker,
                             'entry_date': date,
                             'entry_time': timestamp.strftime('%H:%M'),
@@ -684,36 +902,34 @@ class OctNovSimulator:
                             'stop_price': stop_price,
                             'target_price': target_price,
                             'shares': shares,
-                            'position_size': 1.0,
-                            'hit_5R': False,
+                            'cost': cost,
                             'p2_prob': prob,
-                            'partial_exits': []  # Track all exits across days
-                        }
-                        
-                        active_positions.append(position)
-                        # Don't subtract cash on entry - we're not actually spending it yet
-                        # Cash will be updated when position closes based on P&L
-                        trades_entered_today += 1
-                        
-                        # Mark ticker as entered
-                        entered_tickers_today.add(ticker)
-                        entered_tickers_this_month.add(ticker)
-                        
-                        print(f"\n   🚨 {ticker} at {timestamp.strftime('%H:%M')}")
-                        print(f"      P2 (pre-screened): {prob*100:.1f}% ✅")
-                        print(f"      ✅ ENTERED: ${entry_price:.2f}")
-                        print(f"      Shares: {shares} | Stop: ${stop_price:.2f} | Cash: ${self.cash:,.0f}")
-                        
-                        # Remove from hot list after entering
-                        del hot_list[ticker]
-                        break  # Move to next stock after entering
+                            'status': 'open'
+                        })
+                    except Exception:
+                        pass
+
+                    print(f"\n   🚨 {ticker} at {timestamp.strftime('%H:%M')}")
+                    print(f"      P2 (pre-screened): {prob*100:.1f}% ✅")
+                    print(f"      ✅ ENTERED: ${entry_price:.2f}")
+                    print(f"      Shares: {shares} | Stop: ${stop_price:.2f} | Cash: ${self.cash:,.0f}")
+                
+                # After attempting entries, write the daily pipeline pass CSV and per-day JSON
+                try:
+                    p1_passers = [s['ticker'] for s in watchlist]
+                    selected = [(i['ticker'], i['p2_prob']) for i in to_enter] if 'to_enter' in locals() and to_enter else []
+                    self.write_daily_pipeline_log(date, p1_passers, p2_passers, selected)
+                    # candidates is a list of dicts we built while scanning; write it to JSON
+                    self.write_daily_candidates_json(date, getattr(self, '_current_run_id', ''), candidates, selected)
+                except Exception:
+                    pass
         
         # Final results
             # Save checkpoint at end of each day so we can resume if interrupted
             try:
                 self.last_completed_day = date
-                joblib.dump(self, self.checkpoint_path)
-                print(f"   [Checkpoint] Saved checkpoint for {date} -> {self.checkpoint_path}")
+                # Save only serializable state to avoid pickling locks and downloader objects
+                self.save_checkpoint()
             except Exception as e:
                 print(f"⚠️ Failed to write checkpoint: {e}")
 
@@ -780,7 +996,21 @@ def main():
     if args.resume and checkpoint_path.exists():
         try:
             print(f"Resuming from checkpoint: {checkpoint_path}")
-            sim = joblib.load(checkpoint_path)
+            loaded = joblib.load(checkpoint_path)
+            # If the checkpoint contains the lightweight serializable state (dict), rebuild simulator
+            if isinstance(loaded, dict):
+                state = loaded
+                sim = OctNovSimulator(starting_cash=state.get('starting_cash', 30000))
+                sim.cash = state.get('cash', sim.cash)
+                sim.trades = state.get('trades', [])
+                sim.positions = state.get('positions', [])
+                sim.last_completed_day = state.get('last_completed_day', None)
+                sim.pipeline1_threshold = state.get('pipeline1_threshold', sim.pipeline1_threshold)
+                sim.pipeline2_threshold = state.get('pipeline2_threshold', sim.pipeline2_threshold)
+            else:
+                # Legacy: checkpoint was a dumped simulator object
+                sim = loaded
+
             # Determine the resume start date (start after last_completed_day)
             start_from = getattr(sim, 'last_completed_day', None)
             if start_from is None:
