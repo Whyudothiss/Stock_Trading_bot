@@ -343,9 +343,8 @@ class OctNovSimulator:
         return trading_days
     
     def scan_for_consolidations(self, tickers, date):
-        """Run Pipeline 1 on all tickers for this date (parallelized)"""
+        """Run Pipeline 1 on all tickers for this date (parallelized but deterministic)"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        watchlist = []
         scan_date_dt = datetime.strptime(date, '%Y-%m-%d')
         
         # Sort tickers alphabetically for deterministic processing order
@@ -376,16 +375,21 @@ class OctNovSimulator:
             except Exception:
                 return None
 
-        # Use up to 8 threads (tune as needed for your CPU)
+        # Collect results in a dict keyed by ticker to maintain deterministic order
+        results_dict = {}
         max_workers = min(8, len(tickers))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_ticker, ticker): ticker for ticker in tickers}
             for i, future in enumerate(as_completed(futures)):
                 if (i + 1) % 20 == 0:
                     print(f"   Progress: {i+1}/{len(tickers)}")
+                ticker = futures[future]
                 result = future.result()
                 if result:
-                    watchlist.append(result)
+                    results_dict[ticker] = result
+        
+        # Rebuild watchlist in original sorted ticker order (deterministic)
+        watchlist = [results_dict[ticker] for ticker in tickers if ticker in results_dict]
         return watchlist
         
         print(f"✅ Found {len(watchlist)} consolidations (>={self.pipeline1_threshold*100:.0f}%)")
@@ -482,9 +486,10 @@ class OctNovSimulator:
             return False, 0.0
     
     def manage_position_intraday(self, position, date, intraday_data, daily_data):
-        """Manage a position for one trading day"""
+        """Manage a position for one trading day using only daily data (no intraday downloads)"""
         try:
-            if intraday_data is None or intraday_data.empty:
+            # Use daily data only to avoid excessive API calls
+            if daily_data is None or daily_data.empty:
                 return None  # Hold position
 
             current_stop = position['stop_price']
@@ -494,33 +499,6 @@ class OctNovSimulator:
 
             # Recalculate total_exit_price from all previous partial exits
             total_exit_price = sum(exit['price'] * exit['size'] for exit in partial_exits)
-
-            # First: handle intraday target (5R) partial exits as before
-            for idx, row in intraday_data.iterrows():
-                if not hit_5R and position_size == 1.0 and row['High'] >= position['target_price']:
-                    # Take 20% profit at 5R
-                    partial_exits.append({
-                        'time': idx,
-                        'price': position['target_price'],
-                        'size': 0.20,
-                        'reason': 'PARTIAL_5R'
-                    })
-                    total_exit_price += position['target_price'] * 0.20
-                    position_size = 0.80
-                    # Move stop to breakeven (entry price)
-                    current_stop = position['entry_price']
-                    hit_5R = True
-
-            # After intraday checks, use daily data (yfinance) to determine stop or SMA exit
-            # daily_data should include today's bar as the last row
-            if daily_data is None or daily_data.empty:
-                return {
-                    'exited': False,
-                    'position_size': position_size,
-                    'stop_price': current_stop,
-                    'hit_5R': hit_5R,
-                    'partial_exits': partial_exits
-                }
 
             # Ensure we have 1D series for Low/Close
             low_series = _ensure_1d_series(daily_data, 'Low')
@@ -535,7 +513,22 @@ class OctNovSimulator:
             except Exception:
                 today_close = float('nan')
 
-            # Check stop using daily low (with slippage applied at exit)
+            # 1. Check if close is above 5R target (take 20% profit at close price)
+            if not hit_5R and position_size == 1.0 and pd.notna(today_close) and today_close >= position['target_price']:
+                # Take 20% profit at close price
+                partial_exits.append({
+                    'time': daily_data.index[-1],
+                    'price': today_close,
+                    'size': 0.20,
+                    'reason': 'PARTIAL_5R'
+                })
+                total_exit_price += today_close * 0.20
+                position_size = 0.80
+                # Move stop to breakeven (entry price)
+                current_stop = position['entry_price']
+                hit_5R = True
+
+            # 2. Check stop using daily low (with slippage applied at exit)
             if pd.notna(today_low) and today_low <= current_stop and position_size > 0:
                 exit_price_with_slippage = current_stop * 0.995
                 partial_exits.append({
@@ -547,14 +540,14 @@ class OctNovSimulator:
                 total_exit_price += exit_price_with_slippage * position_size
                 position_size = 0
 
-            # If not stopped, check SMA10 using daily_data
+            # 3. If not stopped, check SMA10 using daily_data
             elif 'SMA10' in daily_data.columns and position_size > 0:
                 try:
                     current_sma = float(daily_data['SMA10'].iloc[-1])
                 except Exception:
                     current_sma = float('nan')
                 if pd.notna(current_sma) and pd.notna(today_close) and today_close < current_sma:
-                    # Exit at close price (no intraday check)
+                    # Exit at close price
                     partial_exits.append({
                         'time': daily_data.index[-1],
                         'price': today_close,
@@ -659,31 +652,18 @@ class OctNovSimulator:
                 for position in active_positions:
                     ticker = position['ticker']
                     
-                    # Check daily 10 SMA FIRST (before intraday) using Twelve Data daily bars
+                    # Get daily data for position management (no intraday downloads to reduce API calls)
                     date_dt = datetime.strptime(date, '%Y-%m-%d')
                     start_date = (date_dt - timedelta(days=15)).strftime('%Y-%m-%d')
                     daily_data = td_get_daily(ticker, start_date, date, api_key=self.td_api_key)
                     
-                    # Check if yesterday closed below 10 SMA
+                    # Calculate SMA10 if we have enough data
                     if len(daily_data) >= 11:
                         close_series = _ensure_1d_series(daily_data, 'Close')
                         daily_data['SMA10'] = close_series.rolling(10).mean()
-                        # Yesterday is the last bar in daily_data (download end date excludes today)
-                        try:
-                            yesterday_close = float(close_series.iloc[-1])
-                        except Exception:
-                            yesterday_close = float('nan')
-                        try:
-                            yesterday_sma = float(daily_data['SMA10'].iloc[-1])
-                        except Exception:
-                            yesterday_sma = float('nan')
-                        
-                        # (Removed redundant pre-intraday SMA close — end-of-day logic already handles closes below SMA)
                     
-                    # Get intraday data for regular position management
-                    intraday_data = td_get_intraday(ticker, date, api_key=self.td_api_key)
-                    
-                    result = self.manage_position_intraday(position, date, intraday_data, daily_data)
+                    # Manage position using only daily data (no intraday downloads)
+                    result = self.manage_position_intraday(position, date, None, daily_data)
                     
                     if result and result['exited']:
                         # Position closed
