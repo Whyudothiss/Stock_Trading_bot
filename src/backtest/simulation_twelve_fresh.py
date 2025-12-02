@@ -106,7 +106,7 @@ class FreshSimulator:
         
         print("Loading models...")
         pipeline1_data = joblib.load('models/consolidation_detector.pkl')
-        pipeline2_model = joblib.load('models/5R_predictor_5min_twelve.pkl')
+        pipeline2_model = joblib.load('models/5R_predictor_5min.pkl')
         
         self.pipeline1_model = pipeline1_data['model']
         self.pipeline1_features = pipeline1_data['feature_names']
@@ -124,8 +124,8 @@ class FreshSimulator:
         )
         
         # Thresholds
-        self.pipeline1_threshold = 0.70
-        self.pipeline2_threshold = 0.17
+        self.pipeline1_threshold = 0.75
+        self.pipeline2_threshold = 0.45
         
         # Capital
         self.starting_cash = starting_cash
