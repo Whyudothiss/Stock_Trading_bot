@@ -104,23 +104,40 @@ class ConsolidationFeatureExtractor:
     
     def _add_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate technical indicators."""
+        # Ensure we have 1D Series for Close/High/Low/Volume (handle MultiIndex)
+        close_series = df['Close']
+        if isinstance(close_series, pd.DataFrame):
+            close_series = close_series.iloc[:, 0]
+        
+        high_series = df['High']
+        if isinstance(high_series, pd.DataFrame):
+            high_series = high_series.iloc[:, 0]
+        
+        low_series = df['Low']
+        if isinstance(low_series, pd.DataFrame):
+            low_series = low_series.iloc[:, 0]
+        
+        volume_series = df['Volume']
+        if isinstance(volume_series, pd.DataFrame):
+            volume_series = volume_series.iloc[:, 0]
+        
         # SMAs
-        df['SMA_10'] = df['Close'].rolling(10).mean()
-        df['SMA_20'] = df['Close'].rolling(20).mean()
-        df['SMA_50'] = df['Close'].rolling(50).mean()
+        df['SMA_10'] = close_series.rolling(10).mean()
+        df['SMA_20'] = close_series.rolling(20).mean()
+        df['SMA_50'] = close_series.rolling(50).mean()
         
         # Volume average
-        df['Volume_Avg_20'] = df['Volume'].rolling(20).mean()
+        df['Volume_Avg_20'] = volume_series.rolling(20).mean()
         
         # ATR (Average True Range)
-        df['High_Low'] = df['High'] - df['Low']
-        df['High_Close'] = abs(df['High'] - df['Close'].shift())
-        df['Low_Close'] = abs(df['Low'] - df['Close'].shift())
+        df['High_Low'] = high_series - low_series
+        df['High_Close'] = abs(high_series - close_series.shift())
+        df['Low_Close'] = abs(low_series - close_series.shift())
         df['TR'] = df[['High_Low', 'High_Close', 'Low_Close']].max(axis=1)
         df['ATR_14'] = df['TR'].rolling(14).mean()
         
         # Returns
-        df['Return_1d'] = df['Close'].pct_change()
+        df['Return_1d'] = close_series.pct_change()
         
         return df
     
