@@ -166,7 +166,10 @@ def _ensure_1d_series(df: pd.DataFrame, col: str) -> pd.Series:
 class OctNovSimulator:
     """Simulate Oct-Nov 2025 with yfinance data"""
     
-    def __init__(self, starting_cash=30000):
+    def __init__(self, starting_cash=30000, random_seed=42):
+        # Set random seed for reproducibility
+        np.random.seed(random_seed)
+        
         # Load models
         print("Loading models...")
         pipeline1_data = joblib.load('models/consolidation_detector.pkl')
@@ -344,6 +347,9 @@ class OctNovSimulator:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         watchlist = []
         scan_date_dt = datetime.strptime(date, '%Y-%m-%d')
+        
+        # Sort tickers alphabetically for deterministic processing order
+        tickers = sorted(tickers)
 
         def process_ticker(ticker):
             try:
@@ -762,15 +768,16 @@ class OctNovSimulator:
             max_trades_per_day = 3
             hot_list = {}  # ticker -> {last_prob, last_check_time}
             
-            # Sort watchlist by Pipeline 1 probability (highest first)
+            # Sort watchlist by Pipeline 1 probability (highest first), then by ticker name for determinism
             # This ensures we prioritize the best setups when we hit the 3-trade limit
-            watchlist = sorted(watchlist, key=lambda x: x['prob'], reverse=True)
+            watchlist = sorted(watchlist, key=lambda x: (-x['prob'], x['ticker']))
             
             # Get intraday data for all tickers in the watchlist (only these are flagged by Pipeline1)
             # We will scan each flagged ticker for a Pipeline2 pass and record the first breakout details.
             candidates = []  # will hold dicts with breakout entry info and p2 prob
             p2_passers = {}  # ticker -> highest p2 prob observed during scanning
 
+            # Process watchlist in sorted order (already sorted by prob, ticker above)
             for stock in watchlist:
                 ticker = stock['ticker']
                 prev_day_high = prev_day_data.get(ticker, stock.get('consol_high'))
@@ -844,8 +851,8 @@ class OctNovSimulator:
             if not candidates:
                 print('   No Pipeline2 candidates found for flagged tickers')
             else:
-                # sort by p2_prob descending
-                candidates = sorted(candidates, key=lambda x: x['p2_prob'], reverse=True)
+                # sort by p2_prob descending, then by ticker name for determinism
+                candidates = sorted(candidates, key=lambda x: (-x['p2_prob'], x['ticker']))
                 to_enter = candidates[:max_trades_per_day]
 
                 for info in to_enter:
@@ -1024,7 +1031,7 @@ def main():
             print(f"Failed to load checkpoint: {e}")
 
     # No resume: start fresh
-    sim = OctNovSimulator(starting_cash=30000)
+    sim = OctNovSimulator(starting_cash=30000, random_seed=42)
     sim.run_simulation(tickers)
 
 
