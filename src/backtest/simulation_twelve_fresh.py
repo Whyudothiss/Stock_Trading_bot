@@ -136,7 +136,7 @@ class FreshSimulator:
         self.trades = []
         self.positions = []
     
-    def get_trading_days(self, start_date='2025-10-01', end_date='2025-10-02'):
+    def get_trading_days(self, start_date='2025-10-01', end_date='2025-10-31'):
         """Get all trading days between start and end"""
         trading_days = []
         current = datetime.strptime(start_date, '%Y-%m-%d')
