@@ -22,6 +22,7 @@ from pathlib import Path
 import sys
 from typing import Dict, List, Optional
 import pytz
+import yfinance as yf
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -29,11 +30,83 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
     from ml_pipeline.breakout_features import BreakoutFeatureExtractor
     from ml_pipeline.consolidation_features import ConsolidationFeatureExtractor
-    from data_processing.download_minute_data import AlpacaMinuteDownloader
+    from data_processing.download_minute_data import TwelveDataMinuteDownloader
 except ImportError as e:
     print(f"⚠️  Warning: Could not import ML pipeline modules: {e}")
     print("   Make sure you're running from the project root")
     sys.exit(1)
+
+
+def td_get_intraday(ticker: str, date: str, downloader) -> pd.DataFrame:
+    """Fetch 5-min intraday bars for a single date from Twelve Data."""
+    df = downloader.download_minute_data(ticker, date, timeframe='5min')
+    if df is None:
+        return pd.DataFrame()
+    cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
+    return df[cols]
+
+
+def td_get_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch daily bars using yfinance (faster, cached)."""
+    cache_dir = Path('data/cache/twelvedata_daily')
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"{ticker}_{start_date}_{end_date}.parquet"
+    
+    if cache_file.exists():
+        try:
+            return pd.read_parquet(cache_file)
+        except Exception:
+            pass
+
+    try:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+        end_plus = end_dt.strftime('%Y-%m-%d')
+    except Exception:
+        end_plus = end_date
+
+    try:
+        df = yf.download(ticker, start=start_date, end=end_plus, interval='1d', 
+                        progress=False, auto_adjust=False)
+    except Exception as e:
+        print(f'   Error fetching daily data for {ticker}: {e}')
+        return pd.DataFrame()
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # Handle MultiIndex columns
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df = df.rename(columns={'Adj Close': 'Close'})
+
+    # Convert to numeric, handling MultiIndex column selections
+    for c in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        if c in df.columns:
+            col = df[c]
+            if isinstance(col, pd.DataFrame):
+                col = col.iloc[:, 0]
+            df[c] = pd.to_numeric(col, errors='coerce')
+
+    # Normalize timezone
+    try:
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
+        else:
+            df.index = df.index.tz_convert('America/New_York')
+    except Exception:
+        pass
+
+    cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
+    out = df[cols].copy()
+    
+    try:
+        out.to_parquet(cache_file)
+    except Exception:
+        pass
+    
+    return out
 
 
 class TradeReplaySimulator:
@@ -82,7 +155,11 @@ class TradeReplaySimulator:
         # Initialize feature extractors
         print("\n🔧 Initializing feature extractors...")
         self.consol_extractor = ConsolidationFeatureExtractor(lookback_days=10)
-        self.breakout_extractor = BreakoutFeatureExtractor(timeframe='5min')
+        self.td_downloader = TwelveDataMinuteDownloader()
+        self.breakout_extractor = BreakoutFeatureExtractor(
+            timeframe='5min',
+            downloader=self.td_downloader
+        )
         
         # Configuration
         self.starting_cash = starting_cash
