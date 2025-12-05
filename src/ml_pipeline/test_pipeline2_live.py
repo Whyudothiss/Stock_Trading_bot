@@ -43,17 +43,15 @@ def test_pipeline2(ticker, date_str, time_str):
         print(f"❌ Error loading model: {e}")
         return None
     
-    # Get 5-minute intraday data
+    # Get 5-minute intraday data from TwelveData
     try:
-        yf_ticker = yf.Ticker(ticker)
-        next_date = (datetime.strptime(date_str, '%Y-%m-%d') + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-        intraday_data = yf_ticker.history(start=date_str, end=next_date, interval='5m')
+        intraday_data = td_downloader.download_minute_data(ticker, date_str, timeframe='5min')
         
-        if intraday_data.empty:
+        if intraday_data is None or intraday_data.empty:
             print(f"❌ No intraday data found for {ticker} on {date_str}")
             return None
         
-        print(f"✅ Downloaded {len(intraday_data)} 5-minute bars")
+        print(f"✅ Downloaded {len(intraday_data)} 5-minute bars from TwelveData")
     except Exception as e:
         print(f"❌ Error downloading data: {e}")
         return None

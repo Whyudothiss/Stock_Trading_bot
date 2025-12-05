@@ -1,7 +1,7 @@
 """
 Test Pipeline 2 for entire trading day
 Checks every 5-minute candle from 9:30 AM to 4:00 PM
-Shows when probability crosses the 45% threshold
+Shows when probability crosses the 30% threshold
 """
 
 import sys
@@ -14,6 +14,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import pandas as pd
 from src.ml_pipeline.breakout_features import BreakoutFeatureExtractor
+from src.data_processing.download_minute_data import TwelveDataMinuteDownloader
 
 def test_pipeline2_full_day(ticker, date_str):
     """
@@ -23,7 +24,7 @@ def test_pipeline2_full_day(ticker, date_str):
         ticker: Stock ticker (e.g., 'RGTI')
         date_str: Date in format 'YYYY-MM-DD' (e.g., '2025-10-02')
     
-    Shows all candles and highlights when probability >= 45%
+    Shows all candles and highlights when probability >= 30%
     """
     print(f"\n{'='*80}")
     print(f"Pipeline 2 Full Day Analysis: {ticker} on {date_str}")
@@ -34,21 +35,20 @@ def test_pipeline2_full_day(ticker, date_str):
         model = joblib.load('models/5R_predictor_5min.pkl')
         with open('models/5R_predictor_5min_features.txt', 'r') as f:
             feature_names = [line.strip() for line in f]
-        extractor = BreakoutFeatureExtractor(timeframe='5Min')
+        td_downloader = TwelveDataMinuteDownloader()
+        extractor = BreakoutFeatureExtractor(timeframe='5min', downloader=td_downloader)
         print("✅ Pipeline 2 model and BreakoutFeatureExtractor loaded")
     except Exception as e:
         print(f"❌ Error loading model or extractor: {e}")
         return None
     
-    # Get 5-minute intraday data
+    # Get 5-minute intraday data from TwelveData
     try:
-        yf_ticker = yf.Ticker(ticker)
-        next_date = (datetime.strptime(date_str, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
-        intraday_data = yf_ticker.history(start=date_str, end=next_date, interval='5m')
-        if intraday_data.empty:
+        intraday_data = td_downloader.download_minute_data(ticker, date_str, timeframe='5min')
+        if intraday_data is None or intraday_data.empty:
             print(f"❌ No intraday data found for {ticker} on {date_str}")
             return None
-        print(f"✅ Downloaded {len(intraday_data)} 5-minute bars\n")
+        print(f"✅ Downloaded {len(intraday_data)} 5-minute bars from TwelveData\n")
     except Exception as e:
         print(f"❌ Error downloading data: {e}")
         return None
@@ -87,7 +87,7 @@ def test_pipeline2_full_day(ticker, date_str):
             'stop': stop_price,
             'risk_pct': features_dict.get('risk_pct', 0),
             'probability': prob,
-            'passes': prob >= 0.45
+            'passes': prob >= 0.30
         })
     
     # Display results
@@ -119,7 +119,7 @@ def test_pipeline2_full_day(ticker, date_str):
         print(f"🎯 First PASS at {first_pass['time']}")
         print(f"   Entry: ${first_pass['entry']:.2f}, Stop: ${first_pass['stop']:.2f}, Probability: {first_pass['probability']*100:.1f}%")
     else:
-        print("❌ No candles passed Pipeline 2 threshold (45%)")
+        print("❌ No candles passed Pipeline 2 threshold (30%)")
     
     return results
 
@@ -131,27 +131,53 @@ def main():
     if len(sys.argv) >= 3:
         ticker = sys.argv[1]
         date_str = sys.argv[2]
-    else:
-        print("\n" + "="*80)
-        print("Pipeline 2 Full Day Testing Tool")
-        print("="*80)
-        print("\nUsage: python test_pipeline2_day.py TICKER DATE")
-        print("Example: python test_pipeline2_day.py RGTI 2025-10-02")
-        print("\n" + "="*80 + "\n")
-        
-        # Interactive mode
-        ticker = input("Enter ticker: ").strip().upper()
-        date_str = input("Enter date (YYYY-MM-DD): ").strip()
-    
-    # Validate date format
-    try:
-        datetime.strptime(date_str, '%Y-%m-%d')
-    except ValueError:
-        print("❌ Invalid date format. Use YYYY-MM-DD")
+        test_pipeline2_full_day(ticker, date_str)
         return
     
-    # Run test
-    test_pipeline2_full_day(ticker, date_str)
+    # Interactive mode
+    print("\n" + "="*80)
+    print("Pipeline 2 Full Day Testing Tool")
+    print("="*80)
+    print("\nUsage: python test_pipeline2_day.py TICKER DATE")
+    print("Example: python test_pipeline2_day.py RGTI 2025-10-02")
+    print("\n" + "="*80 + "\n")
+    
+    while True:
+        try:
+            ticker = input("\nEnter ticker (or 'quit' to exit): ").strip().upper()
+            if ticker.lower() in ['quit', 'exit', 'q', '']:
+                print("\n👋 Goodbye!")
+                break
+            
+            date_str = input("Enter date (YYYY-MM-DD): ").strip()
+            if not date_str:
+                print("⚠️  Please enter a valid date\n")
+                continue
+            
+            # Validate date format
+            try:
+                datetime.strptime(date_str, '%Y-%m-%d')
+            except ValueError:
+                print("❌ Invalid date format. Use YYYY-MM-DD\n")
+                continue
+            
+            # Run test
+            test_pipeline2_full_day(ticker, date_str)
+            
+            print("\n" + "-"*80)
+            
+            # Ask if user wants to check another
+            another = input("\nCheck another stock? (y/n) [y]: ").strip().lower()
+            if another in ['n', 'no']:
+                print("\n👋 Goodbye!")
+                break
+                
+        except KeyboardInterrupt:
+            print("\n\n👋 Goodbye!")
+            break
+        except Exception as e:
+            print(f"\n❌ Error: {e}\n")
+            continue
 
 
 if __name__ == '__main__':
