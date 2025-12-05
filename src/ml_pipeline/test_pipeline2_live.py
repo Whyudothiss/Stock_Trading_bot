@@ -14,6 +14,7 @@ import yfinance as yf
 from datetime import datetime
 import pandas as pd
 from src.ml_pipeline.breakout_features import BreakoutFeatureExtractor
+from src.data_processing.download_minute_data import TwelveDataMinuteDownloader
 
 def test_pipeline2(ticker, date_str, time_str):
     """
@@ -35,7 +36,8 @@ def test_pipeline2(ticker, date_str, time_str):
         model = joblib.load('models/5R_predictor_5min.pkl')
         with open('models/5R_predictor_5min_features.txt', 'r') as f:
             feature_names = [line.strip() for line in f]
-        extractor = BreakoutFeatureExtractor(timeframe='5Min')
+        td_downloader = TwelveDataMinuteDownloader()
+        extractor = BreakoutFeatureExtractor(timeframe='5min', downloader=td_downloader)
         print("✅ Pipeline 2 model loaded")
     except Exception as e:
         print(f"❌ Error loading model: {e}")
@@ -185,30 +187,45 @@ def main():
         date_str = sys.argv[2]
         time_str = sys.argv[3]
         test_pipeline2(ticker, date_str, time_str)
-    else:
-        # Interactive mode
-        print("Interactive Mode (or run: python test_pipeline2_live.py TICKER DATE TIME)")
-        print("Example: python test_pipeline2_live.py BITF 2025-10-01 10:15\n")
-        
-        while True:
-            try:
-                ticker = input("Enter ticker (or 'quit' to exit): ").strip().upper()
-                if ticker in ['QUIT', 'EXIT', 'Q']:
-                    break
-                
-                date_str = input("Enter date (YYYY-MM-DD): ").strip()
-                time_str = input("Enter time (HH:MM): ").strip()
-                
-                test_pipeline2(ticker, date_str, time_str)
-                
-                print("\n" + "-"*70 + "\n")
-                
-            except KeyboardInterrupt:
-                print("\n\nExiting...")
+        return
+    
+    # Interactive mode
+    print("Interactive Mode (or run: python test_pipeline2_live.py TICKER DATE TIME)")
+    print("Example: python test_pipeline2_live.py BITF 2025-10-01 10:15\n")
+    
+    while True:
+        try:
+            ticker = input("\nEnter ticker (or 'quit' to exit): ").strip().upper()
+            if ticker.lower() in ['quit', 'exit', 'q', '']:
+                print("\n👋 Goodbye!")
                 break
-            except Exception as e:
-                print(f"\n❌ Error: {e}\n")
+            
+            date_str = input("Enter date (YYYY-MM-DD): ").strip()
+            if not date_str:
+                print("⚠️  Please enter a valid date\n")
                 continue
+            
+            time_str = input("Enter time (HH:MM): ").strip()
+            if not time_str:
+                print("⚠️  Please enter a valid time\n")
+                continue
+            
+            test_pipeline2(ticker, date_str, time_str)
+            
+            print("\n" + "-"*70)
+            
+            # Ask if user wants to check another
+            another = input("\nCheck another stock? (y/n) [y]: ").strip().lower()
+            if another in ['n', 'no']:
+                print("\n👋 Goodbye!")
+                break
+            
+        except KeyboardInterrupt:
+            print("\n\n👋 Goodbye!")
+            break
+        except Exception as e:
+            print(f"\n❌ Error: {e}\n")
+            continue
 
 
 if __name__ == "__main__":
