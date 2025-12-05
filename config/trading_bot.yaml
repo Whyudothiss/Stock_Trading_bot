@@ -1,0 +1,33 @@
+# Trading Bot Configuration
+
+# Pipeline Thresholds
+pipeline1_threshold: 0.75  # Consolidation detector threshold
+pipeline2_threshold: 0.30  # 5R predictor threshold
+
+# Risk Management
+risk_per_trade_pct: 0.5  # Risk 0.5% of capital per trade
+starting_capital: 30000
+
+# Model Paths
+pipeline1_model: models/consolidation_detector.pkl
+pipeline2_model: models/5R_predictor_5min.pkl
+pipeline2_features: models/5R_predictor_5min_features.txt
+
+# Data Paths
+hotlist_file: data/trading_bot/hotlist.json
+signals_log: data/trading_bot/signals.jsonl
+tickers_universe: data/processed/unique_traded_jun1_oct31_2025.txt
+
+# Market Hours (Eastern Time)
+market_open: "09:30"
+market_close: "16:00"
+premarket_scan: "09:00"  # When to do morning scan
+
+# Trading Rules
+max_trades_per_day: 3
+one_trade_per_ticker_per_day: true
+slippage_pct: 0.5  # 0.5% slippage on entry
+
+# Logging
+log_level: INFO
+log_file: logs/trading_bot.log
