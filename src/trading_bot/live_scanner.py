@@ -30,9 +30,11 @@ import pandas as pd
 import yaml
 import warnings
 import os
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
+import pytz
 
 # Suppress ALL warnings (sklearn feature name warnings are verbose)
 warnings.filterwarnings('ignore')
@@ -254,6 +256,7 @@ class LiveScanner:
         # Tracking
         self.signals_today = []
         self.signaled_tickers = set()  # Track what we've already signaled
+        self.watching_stocks = {}  # {ticker: {'trigger_price': float, 'prob': float, 'detected_at': str}}
         
     def check_pipeline2(self, ticker: str, entry_date: datetime, 
                        entry_price: float, stop_price: float, 
@@ -287,7 +290,7 @@ class LiveScanner:
     
     def generate_signal(self, ticker: str, time_str: str, entry: float, 
                        stop: float, target: float, prob: float, 
-                       risk_pct: float):
+                       risk_pct: float, trigger_price: float = None):
         """Generate and display BUY signal"""
         risk_per_share = entry - stop
         
@@ -297,6 +300,7 @@ class LiveScanner:
             'entry_price': entry,
             'stop_price': stop,
             'target_price': target,
+            'trigger_price': trigger_price,
             'risk_per_share': risk_per_share,
             'risk_pct': risk_pct,
             'probability': prob,
@@ -313,12 +317,16 @@ class LiveScanner:
         print(f"\n📅 Time: {signal['timestamp']}")
         print(f"📈 Ticker: {ticker}")
         print(f"\n💰 Trade Setup:")
-        print(f"   Entry:  ${entry:.2f}")
+        if trigger_price:
+            print(f"   Trigger: ${trigger_price:.2f} (breakout level)")
+        print(f"   Entry:  ${entry:.2f}" + (" (+ slippage)" if trigger_price else ""))
         print(f"   Stop:   ${stop:.2f}")
         print(f"   Target: ${target:.2f} (5R)")
         print(f"   Risk:   ${risk_per_share:.2f}/share ({risk_pct:.2f}%)")
         print(f"\n🎯 Confidence: {prob*100:.1f}%")
         print(f"📊 Risk/Reward: 1:5")
+        if trigger_price:
+            print(f"\n💡 Note: Wait for price to break ${trigger_price:.2f} before entering")
         print("="*80 + "\n")
         
     def scan_intraday_simulated(self, date_str: str):
@@ -341,6 +349,7 @@ class LiveScanner:
         # Reset daily tracking
         self.signaled_tickers.clear()
         self.signals_today.clear()
+        self.watching_stocks.clear()
         
         scan_date = datetime.strptime(date_str, '%Y-%m-%d')
         
@@ -367,55 +376,65 @@ class LiveScanner:
                 print(f"   ❌ Error loading data: {e}")
                 continue
             
-            # Scan each bar
-            # Suppress sklearn warnings for all predictions in this loop
-            import io
-            from contextlib import redirect_stderr
-            
-            f = io.StringIO()
-            with redirect_stderr(f):
-                for i, (bar_time, bar) in enumerate(intraday_data.iterrows()):
-                    # Calculate high/low of day so far
-                    data_so_far = intraday_data.iloc[:i+1]
-                    high_of_day = data_so_far['High'].max()
-                    low_of_day = data_so_far['Low'].min()
-                    
-                    # Calculate hypothetical entry
-                    entry_price = high_of_day * (1 + self.config['slippage_pct']/100)
-                    stop_price = low_of_day
-                    risk = entry_price - stop_price
-                    
-                    if risk <= 0:
-                        continue
-                    
-                    target_price = entry_price + (5 * risk)
-                    risk_pct = (risk / entry_price) * 100
-                    
-                    # Check Pipeline 2
-                    prob = self.check_pipeline2(
-                        ticker, scan_date, entry_price, stop_price, target_price
-                    )
-                    
-                    if prob is None:
-                        continue
-                    
-                    time_str = bar_time.strftime('%H:%M') if hasattr(bar_time, 'strftime') else str(bar_time)[11:16]
-                    
-                    # Check if passes threshold
-                    if prob >= self.config['pipeline2_threshold']:
-                        # Check if not already signaled
-                        if ticker not in self.signaled_tickers:
-                            # Clear the progress line first
-                            print(f"\n   [{time_str}] 🎯 Pipeline 2: {prob*100:.1f}% ✅ PASS\n")
-                            self.generate_signal(
-                                ticker, time_str, entry_price, stop_price, 
-                                target_price, prob, risk_pct
-                            )
-                            break  # Only signal once per ticker per day
-                    else:
-                        # Print every 6th bar to avoid spam
-                        if i % 6 == 0:
-                            print(f"   [{time_str}] Pipeline 2: {prob*100:.1f}%        ", end='\r')
+            # Scan each bar (skip before 9:35 AM - need complete first 5-min candle)
+            for i, (bar_time, bar) in enumerate(intraday_data.iterrows()):
+                # Get current time
+                time_str = bar_time.strftime('%H:%M') if hasattr(bar_time, 'strftime') else str(bar_time)[11:16]
+                hour, minute = int(time_str[:2]), int(time_str[3:5])
+                
+                # Skip before 9:35 AM (first complete 5-min candle ends at 9:35)
+                if hour == 9 and minute < 35:
+                    continue
+                
+                # Calculate high/low of day so far
+                data_so_far = intraday_data.iloc[:i+1]
+                high_of_day = data_so_far['High'].max()
+                low_of_day = data_so_far['Low'].min()
+                
+                # Calculate hypothetical entry
+                entry_price = high_of_day * (1 + self.config['slippage_pct']/100)
+                stop_price = low_of_day
+                risk = entry_price - stop_price
+                
+                if risk <= 0:
+                    continue
+                
+                target_price = entry_price + (5 * risk)
+                risk_pct = (risk / entry_price) * 100
+                
+                # Check Pipeline 2 (suppress warnings inside check_pipeline2)
+                prob = self.check_pipeline2(
+                    ticker, scan_date, entry_price, stop_price, target_price
+                )
+                
+                if prob is None:
+                    continue
+                
+                # Check if passes threshold
+                if prob >= self.config['pipeline2_threshold']:
+                    # Check if not already signaled
+                    if ticker not in self.signaled_tickers:
+                        # Add to watching if not already
+                        if ticker not in self.watching_stocks:
+                            self.watching_stocks[ticker] = {
+                                'trigger_price': high_of_day,
+                                'prob': prob,
+                                'detected_at': time_str
+                            }
+                            print(f"\n   [{time_str}] 👀 WATCHING: {prob*100:.1f}% - Trigger: ${high_of_day:.2f}")
+                        
+                        # Generate signal immediately with trigger price
+                        print(f"   [{time_str}] 🎯 Pipeline 2: {prob*100:.1f}% ✅ PASS\n")
+                        self.generate_signal(
+                            ticker, time_str, entry_price, stop_price, 
+                            target_price, prob, risk_pct, 
+                            trigger_price=self.watching_stocks[ticker]['trigger_price']
+                        )
+                        break  # Only signal once per ticker per day
+                else:
+                    # Print every 6th bar to avoid spam
+                    if i % 6 == 0:
+                        print(f"   [{time_str}] Pipeline 2: {prob*100:.1f}%        ", end='\r')
         
         # Summary
         print(f"\n\n{'='*80}")
@@ -425,6 +444,169 @@ class LiveScanner:
         if self.signals_today:
             print(f"Tickers: {', '.join([s['ticker'] for s in self.signals_today])}")
         print(f"{'='*80}\n")
+    
+    def scan_intraday_live(self):
+        """Live intraday scanning with real-time data polling"""
+        hotlist = self.hotlist_manager.get_hotlist()
+        
+        if not hotlist:
+            print("❌ Hotlist is empty. Add tickers first with 'add TICKER'")
+            return
+        
+        et_tz = pytz.timezone('US/Eastern')
+        today = datetime.now(et_tz).strftime('%Y-%m-%d')
+        
+        print(f"\n{'='*80}")
+        print(f"📊 LIVE INTRADAY SCAN - {today}")
+        print(f"{'='*80}")
+        print(f"\n🔍 Monitoring {len(hotlist)} stocks: {', '.join([s['ticker'] for s in hotlist])}")
+        print(f"   Live mode: Fetching latest 5-min bars from TwelveData")
+        print(f"   Scan interval: Every 5 minutes")
+        print(f"\n⏰ Press Ctrl+C to stop scanning\n")
+        
+        scan_date = datetime.strptime(today, '%Y-%m-%d')
+        last_scan_time = None
+        
+        try:
+            while True:
+                # Check if market is still open
+                if not self.is_market_open():
+                    now_et = datetime.now(et_tz)
+                    print(f"\n⏸️  Market closed at {now_et.strftime('%H:%M')} ET")
+                    print("   Bot will auto-restart tomorrow at 9:35 AM ET\n")
+                    break
+                
+                now_et = datetime.now(et_tz)
+                current_time = now_et.strftime('%H:%M')
+                
+                # Skip if we just scanned (avoid duplicate scans)
+                if last_scan_time == current_time:
+                    time.sleep(30)  # Wait 30s before checking again
+                    continue
+                
+                print(f"\n{'─'*80}")
+                print(f"⏰ Scan at {current_time} ET")
+                print(f"{'─'*80}")
+                
+                for stock in hotlist:
+                    ticker = stock['ticker']
+                    
+                    # Skip if already signaled
+                    if ticker in self.signaled_tickers:
+                        continue
+                    
+                    print(f"\n📈 {ticker} - Consolidation prob: {stock['probability']*100:.1f}%")
+                    
+                    try:
+                        # Fetch latest intraday data
+                        intraday_data = self.td_downloader.download_minute_data(
+                            ticker, today, timeframe='5min'
+                        )
+                        
+                        if intraday_data is None or intraday_data.empty:
+                            print(f"   ⚠️  No intraday data available")
+                            continue
+                        
+                        # Only process bars up to current time
+                        intraday_data = intraday_data[intraday_data.index <= now_et]
+                        
+                        if intraday_data.empty:
+                            print(f"   ⚠️  No data for current time")
+                            continue
+                        
+                        print(f"   ✅ Loaded {len(intraday_data)} bars (up to {current_time})")
+                        
+                        # Get latest bar
+                        latest_bar = intraday_data.iloc[-1]
+                        latest_time = intraday_data.index[-1].strftime('%H:%M')
+                        
+                        # Calculate high/low of day
+                        high_of_day = intraday_data['High'].max()
+                        low_of_day = intraday_data['Low'].min()
+                        current_price = latest_bar['Close']
+                        
+                        # Calculate hypothetical entry
+                        entry_price = high_of_day * (1 + self.config['slippage_pct']/100)
+                        stop_price = low_of_day
+                        risk = entry_price - stop_price
+                        
+                        if risk <= 0:
+                            print(f"   ⚠️  Invalid risk (entry <= stop)")
+                            continue
+                        
+                        target_price = entry_price + (5 * risk)
+                        risk_pct = (risk / entry_price) * 100
+                        
+                        # Check Pipeline 2
+                        prob = self.check_pipeline2(
+                            ticker, scan_date, entry_price, stop_price, target_price
+                        )
+                        
+                        if prob is None:
+                            print(f"   ⚠️  Pipeline 2 check failed")
+                            continue
+                        
+                        print(f"   [{latest_time}] 🎯 Pipeline 2: {prob*100:.1f}%", end='')
+                        
+                        # Check if passes threshold
+                        if prob >= self.config['pipeline2_threshold']:
+                            print(" ✅ PASS\n")
+                            
+                            # Add to watching if not already
+                            if ticker not in self.watching_stocks:
+                                self.watching_stocks[ticker] = {
+                                    'trigger_price': high_of_day,
+                                    'prob': prob,
+                                    'detected_at': latest_time
+                                }
+                                print(f"   👀 WATCHING: Trigger @ ${high_of_day:.2f}")
+                            
+                            # Generate signal
+                            self.generate_signal(
+                                ticker, latest_time, entry_price, stop_price,
+                                target_price, prob, risk_pct,
+                                trigger_price=self.watching_stocks[ticker]['trigger_price']
+                            )
+                        else:
+                            print()
+                        
+                    except Exception as e:
+                        print(f"   ❌ Error: {e}")
+                        continue
+                
+                last_scan_time = current_time
+                
+                # Wait 5 minutes before next scan
+                print(f"\n⏳ Next scan in 5 minutes...")
+                time.sleep(300)  # 5 minutes
+                
+        except KeyboardInterrupt:
+            print("\n\n🛑 Scanning stopped by user\n")
+        
+        # Summary
+        print(f"\n{'='*80}")
+        print(f"📊 SCAN SESSION COMPLETE")
+        print(f"{'='*80}")
+        print(f"Signals generated: {len(self.signals_today)}")
+        if self.signals_today:
+            print(f"Tickers: {', '.join([s['ticker'] for s in self.signals_today])}")
+        print(f"{'='*80}\n")
+    
+    def is_market_open(self) -> bool:
+        """Check if US market is currently open (9:35 AM - 4:00 PM ET)"""
+        et_tz = pytz.timezone('US/Eastern')
+        now_et = datetime.now(et_tz)
+        
+        # Check if weekday (Mon-Fri)
+        if now_et.weekday() >= 5:  # 5=Saturday, 6=Sunday
+            return False
+        
+        # Check time (after 9:35 AM, before 4:00 PM)
+        current_time = now_et.time()
+        market_open = current_time >= datetime.strptime('09:35', '%H:%M').time()
+        market_close = current_time < datetime.strptime('16:00', '%H:%M').time()
+        
+        return market_open and market_close
     
     def show_hotlist(self):
         """Display current hotlist"""
@@ -535,10 +717,18 @@ class LiveScanner:
                         print("❌ Cancelled\n")
                 
                 elif command == 'scan':
-                    if not self.simulation_date:
-                        print("\n❌ Scanning requires --date parameter in simulation mode\n")
-                    else:
+                    if self.simulation_date:
+                        # Simulation mode
                         self.scan_intraday_simulated(self.simulation_date)
+                    else:
+                        # Live mode
+                        if not self.is_market_open():
+                            et_tz = pytz.timezone('US/Eastern')
+                            now_et = datetime.now(et_tz)
+                            print(f"\n⚠️  Market is closed (current time: {now_et.strftime('%H:%M')} ET)")
+                            print("   Market hours: 9:35 AM - 4:00 PM ET, Mon-Fri\n")
+                        else:
+                            self.scan_intraday_live()
                 
                 elif command == 'revalidate':
                     print(f"\n🔍 Re-validating hotlist with Pipeline 1...\n")
