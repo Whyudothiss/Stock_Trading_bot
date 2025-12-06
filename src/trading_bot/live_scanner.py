@@ -28,9 +28,36 @@ import joblib
 import numpy as np
 import pandas as pd
 import yaml
+import warnings
+import os
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
+
+# Suppress ALL warnings (sklearn feature name warnings are verbose)
+warnings.filterwarnings('ignore')
+os.environ['PYTHONWARNINGS'] = 'ignore'
+
+# Also suppress warnings from sklearn at import time
+import logging
+logging.getLogger('sklearn').setLevel(logging.ERROR)
+
+# Context manager to suppress stderr during predictions
+from contextlib import contextmanager
+
+@contextmanager
+def suppress_stderr():
+    """Temporarily suppress stderr to hide sklearn warnings"""
+    stderr_fd = sys.stderr.fileno()
+    old_stderr = os.dup(stderr_fd)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, stderr_fd)
+    os.close(devnull)
+    try:
+        yield
+    finally:
+        os.dup2(old_stderr, stderr_fd)
+        os.close(old_stderr)
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -90,8 +117,9 @@ class HotlistManager:
             feature_values = [features.get(f, 0) for f in self.pipeline1_features]
             X = pd.DataFrame([feature_values], columns=self.pipeline1_features)
             
-            # Predict
-            prob = self.pipeline1_model.predict_proba(X)[0][1]
+            # Predict (suppress warnings)
+            with suppress_stderr():
+                prob = self.pipeline1_model.predict_proba(X)[0][1]
             
             return prob, features
             
@@ -246,10 +274,11 @@ class LiveScanner:
             if not features:
                 return None
             
-            # Predict
+            # Predict (suppress warnings)
             X = np.array([[features.get(f, 0) for f in self.pipeline2_features]])
             X = np.nan_to_num(X, nan=0.0, posinf=1e10, neginf=-1e10)
-            prob = self.pipeline2_model.predict_proba(X)[0][1]
+            with suppress_stderr():
+                prob = self.pipeline2_model.predict_proba(X)[0][1]
             
             return prob
             
@@ -339,47 +368,54 @@ class LiveScanner:
                 continue
             
             # Scan each bar
-            for i, (bar_time, bar) in enumerate(intraday_data.iterrows()):
-                # Calculate high/low of day so far
-                data_so_far = intraday_data.iloc[:i+1]
-                high_of_day = data_so_far['High'].max()
-                low_of_day = data_so_far['Low'].min()
-                
-                # Calculate hypothetical entry
-                entry_price = high_of_day * (1 + self.config['slippage_pct']/100)
-                stop_price = low_of_day
-                risk = entry_price - stop_price
-                
-                if risk <= 0:
-                    continue
-                
-                target_price = entry_price + (5 * risk)
-                risk_pct = (risk / entry_price) * 100
-                
-                # Check Pipeline 2
-                prob = self.check_pipeline2(
-                    ticker, scan_date, entry_price, stop_price, target_price
-                )
-                
-                if prob is None:
-                    continue
-                
-                time_str = bar_time.strftime('%H:%M') if hasattr(bar_time, 'strftime') else str(bar_time)[11:16]
-                
-                # Check if passes threshold
-                if prob >= self.config['pipeline2_threshold']:
-                    # Check if not already signaled
-                    if ticker not in self.signaled_tickers:
-                        print(f"\n   [{time_str}] 🎯 Pipeline 2: {prob*100:.1f}% ✅ PASS")
-                        self.generate_signal(
-                            ticker, time_str, entry_price, stop_price, 
-                            target_price, prob, risk_pct
-                        )
-                        break  # Only signal once per ticker per day
-                else:
-                    # Print every 6th bar to avoid spam
-                    if i % 6 == 0:
-                        print(f"   [{time_str}] Pipeline 2: {prob*100:.1f}%", end='\r')
+            # Suppress sklearn warnings for all predictions in this loop
+            import io
+            from contextlib import redirect_stderr
+            
+            f = io.StringIO()
+            with redirect_stderr(f):
+                for i, (bar_time, bar) in enumerate(intraday_data.iterrows()):
+                    # Calculate high/low of day so far
+                    data_so_far = intraday_data.iloc[:i+1]
+                    high_of_day = data_so_far['High'].max()
+                    low_of_day = data_so_far['Low'].min()
+                    
+                    # Calculate hypothetical entry
+                    entry_price = high_of_day * (1 + self.config['slippage_pct']/100)
+                    stop_price = low_of_day
+                    risk = entry_price - stop_price
+                    
+                    if risk <= 0:
+                        continue
+                    
+                    target_price = entry_price + (5 * risk)
+                    risk_pct = (risk / entry_price) * 100
+                    
+                    # Check Pipeline 2
+                    prob = self.check_pipeline2(
+                        ticker, scan_date, entry_price, stop_price, target_price
+                    )
+                    
+                    if prob is None:
+                        continue
+                    
+                    time_str = bar_time.strftime('%H:%M') if hasattr(bar_time, 'strftime') else str(bar_time)[11:16]
+                    
+                    # Check if passes threshold
+                    if prob >= self.config['pipeline2_threshold']:
+                        # Check if not already signaled
+                        if ticker not in self.signaled_tickers:
+                            # Clear the progress line first
+                            print(f"\n   [{time_str}] 🎯 Pipeline 2: {prob*100:.1f}% ✅ PASS\n")
+                            self.generate_signal(
+                                ticker, time_str, entry_price, stop_price, 
+                                target_price, prob, risk_pct
+                            )
+                            break  # Only signal once per ticker per day
+                    else:
+                        # Print every 6th bar to avoid spam
+                        if i % 6 == 0:
+                            print(f"   [{time_str}] Pipeline 2: {prob*100:.1f}%        ", end='\r')
         
         # Summary
         print(f"\n\n{'='*80}")
