@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Trading Scanner</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Live Trading Scanner</h1>
+            <div id="status-bar" class="status-bar">
+                <span id="market-status" class="status-badge">Loading...</span>
+                <span id="scanner-status" class="status-badge">Scanner: OFF</span>
+                <span id="current-time">--:--:-- ET</span>
+            </div>
+        </header>
+
+        <div class="grid">
+            <!-- Scanner Controls -->
+            <div class="card">
+                <h2>Scanner Controls</h2>
+                <div class="button-group">
+                    <button id="start-scanner" class="btn btn-success">▶️ Start Scanner</button>
+                    <button id="stop-scanner" class="btn btn-danger">⏸️ Stop Scanner</button>
+                </div>
+                <div id="scanner-message" class="message"></div>
+            </div>
+
+            <!-- Add Ticker -->
+            <div class="card">
+                <h2>Add Ticker to Hotlist</h2>
+                <div class="input-group">
+                    <input type="text" id="ticker-input" placeholder="TICKER" maxlength="6">
+                    <button id="add-ticker" class="btn btn-primary">Add</button>
+                </div>
+                <div id="add-message" class="message"></div>
+            </div>
+
+            <!-- Hotlist -->
+            <div class="card hotlist-card">
+                <div class="card-header">
+                    <h2>📋 Hotlist (<span id="hotlist-count">0</span>)</h2>
+                    <button id="revalidate-hotlist" class="btn btn-secondary btn-sm">🔄 Revalidate</button>
+                </div>
+                <div id="hotlist" class="hotlist">
+                    <div class="loading">Loading hotlist...</div>
+                </div>
+                <button id="clear-hotlist" class="btn btn-danger btn-sm">Clear All</button>
+            </div>
+
+            <!-- Signals -->
+            <div class="card signals-card">
+                <h2>🚨 Signals Today (<span id="signals-count">0</span>)</h2>
+                <div id="signals" class="signals">
+                    <div class="loading">No signals yet</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
