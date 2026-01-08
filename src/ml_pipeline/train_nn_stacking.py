@@ -200,7 +200,7 @@ def main():
     print("\n1. Loading training data...")
     if args.data_source == 'twelve':
         data_file = Path('data/processed/features_5R_5min_twelve.jsonl')
-        model_file = Path('models/5R_predictor_5min.pkl')
+        model_file = Path('models/5R_predictor_5min_twelve.pkl')
     else:
         data_file = Path('data/processed/features_5R_5min.jsonl')
         model_file = Path('models/5R_predictor_5min.pkl')
