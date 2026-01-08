@@ -35,6 +35,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 import pytz
+import websocket
+import ssl
 
 # Suppress ALL warnings (sklearn feature name warnings are verbose)
 warnings.filterwarnings('ignore')
@@ -221,14 +223,16 @@ class HotlistManager:
 class LiveScanner:
     """Main trading bot that monitors hotlist and generates signals"""
     
-    def __init__(self, config: dict, simulation_date: str = None):
+    def __init__(self, config: dict, simulation_date: str = None, ws_mode: bool = False):
         self.config = config
         self.simulation_date = simulation_date
+        self.ws_mode = ws_mode
         
         print("\n" + "="*80)
         print("🤖 LIVE TRADING BOT - CLI")
         print("="*80)
-        print(f"\nMode: {'SIMULATION' if simulation_date else 'LIVE'}")
+        mode_str = 'SIMULATION' if simulation_date else ('LIVE - WebSocket' if ws_mode else 'LIVE - REST API')
+        print(f"\nMode: {mode_str}")
         if simulation_date:
             print(f"Date: {simulation_date}")
         print()
@@ -257,6 +261,10 @@ class LiveScanner:
         self.signals_today = []
         self.signaled_tickers = set()  # Track what we've already signaled
         self.watching_stocks = {}  # {ticker: {'trigger_price': float, 'prob': float, 'detected_at': str}}
+        
+        # WebSocket data storage (used in WebSocket mode - no threading needed)
+        self.ws_bars = {}  # {ticker: DataFrame of bars}
+        self.ws_last_check = {}  # {ticker: last check timestamp}
         
     def check_pipeline2(self, ticker: str, entry_date: datetime, 
                        entry_price: float, stop_price: float, 
@@ -498,7 +506,11 @@ class LiveScanner:
                     print(f"\n📈 {ticker} - Consolidation prob: {stock['probability']*100:.1f}%")
                     
                     try:
-                        # Fetch latest intraday data
+                        # Fetch latest intraday data (bypass cache for live mode)
+                        cache_file = self.td_downloader.cache_dir / f"{ticker}_{today}_5min.parquet"
+                        if cache_file.exists():
+                            cache_file.unlink()  # Delete cache to force fresh download
+                        
                         intraday_data = self.td_downloader.download_minute_data(
                             ticker, today, timeframe='5min'
                         )
@@ -506,6 +518,11 @@ class LiveScanner:
                         if intraday_data is None or intraday_data.empty:
                             print(f"   ⚠️  No intraday data available")
                             continue
+                        
+                        # Localize timezone for comparison
+                        if intraday_data.index.tz is None:
+                            # Make timezone-aware (assume US/Eastern)
+                            intraday_data.index = intraday_data.index.tz_localize('US/Eastern')
                         
                         # Only process bars up to current time
                         intraday_data = intraday_data[intraday_data.index <= now_et]
@@ -592,21 +609,383 @@ class LiveScanner:
             print(f"Tickers: {', '.join([s['ticker'] for s in self.signals_today])}")
         print(f"{'='*80}\n")
     
+    def scan_intraday_websocket(self):
+        """Live intraday scanning with TwelveData WebSocket"""
+        hotlist = self.hotlist_manager.get_hotlist()
+        
+        if not hotlist:
+            print("❌ Hotlist is empty. Add tickers first with 'add TICKER'")
+            return
+        
+        tickers = [stock['ticker'] for stock in hotlist]
+        et_tz = pytz.timezone('US/Eastern')
+        today = datetime.now(et_tz).strftime('%Y-%m-%d')
+        scan_date = datetime.strptime(today, '%Y-%m-%d')
+        
+        print(f"\n{'='*80}")
+        print(f"📊 LIVE WEBSOCKET SCAN - {today}")
+        print(f"{'='*80}")
+        print(f"\n🔍 Monitoring {len(hotlist)} stocks: {', '.join(tickers)}")
+        print(f"   WebSocket mode: Real-time 5-min bars from TwelveData")
+        print(f"\n⏰ Press Ctrl+C to stop scanning\n")
+        
+        # Initialize storage (no lock needed - synchronous)
+        for ticker in tickers:
+            self.ws_bars[ticker] = pd.DataFrame()
+            self.ws_last_check[ticker] = None
+        
+        # Get API key
+        api_key = os.getenv('TWELVEDATA_API_KEY')
+        if not api_key:
+            print("❌ TWELVEDATA_API_KEY not found in environment")
+            return
+        
+        # Build WebSocket URL
+        symbols_str = ','.join(tickers)
+        ws_url = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={api_key}"
+        
+        def on_message(ws, message):
+            """Handle incoming WebSocket messages"""
+            try:
+                data = json.loads(message)
+                
+                # Connection status
+                if data.get('event') == 'subscribe-status':
+                    if data.get('status') == 'ok':
+                        print(f"✅ Subscribed to {data.get('symbol')}")
+                    else:
+                        print(f"⚠️  Subscribe failed: {data}")
+                    return
+                
+                # Heartbeat
+                if data.get('event') == 'heartbeat':
+                    return
+                
+                # Price update
+                if 'symbol' in data and 'price' in data:
+                    ticker = data['symbol']
+                    timestamp = datetime.fromtimestamp(data.get('timestamp', time.time()), tz=et_tz)
+                    
+                    # Create bar data
+                    bar = pd.DataFrame([{
+                        'timestamp': timestamp,
+                        'price': float(data['price']),
+                        'high': float(data.get('day_high', data['price'])),
+                        'low': float(data.get('day_low', data['price'])),
+                        'volume': int(data.get('day_volume', 0))
+                    }])
+                    
+                    # Store bar (no lock needed - single-threaded event loop)
+                    if ticker in self.ws_bars:
+                        self.ws_bars[ticker] = pd.concat([self.ws_bars[ticker], bar], ignore_index=True)
+                    
+                    # Check if should evaluate (throttle to every 5 minutes)
+                    current_time = timestamp.strftime('%H:%M')
+                    last_check = self.ws_last_check.get(ticker)
+                    
+                    if last_check is None or (timestamp - last_check).total_seconds() >= 300:
+                        self.ws_last_check[ticker] = timestamp
+                        self._evaluate_ticker_ws(ticker, scan_date, et_tz)
+                    
+            except Exception as e:
+                print(f"❌ Error processing message: {e}")
+        
+        def on_error(ws, error):
+            """Handle WebSocket errors"""
+            print(f"❌ WebSocket error: {error}")
+        
+        def on_close(ws, close_status_code, close_msg):
+            """Handle WebSocket close"""
+            print(f"\n🔌 WebSocket closed")
+        
+        def on_open(ws):
+            """Subscribe to tickers when connection opens"""
+            print(f"🔌 WebSocket connected\n")
+            
+            # Subscribe to all tickers at once (comma-separated per docs)
+            subscribe_msg = {
+                "action": "subscribe",
+                "params": {
+                    "symbols": ",".join(tickers)
+                }
+            }
+            ws.send(json.dumps(subscribe_msg))
+            print(f"📡 Subscribed to {len(tickers)} tickers\n")
+        
+        # Create WebSocket connection
+        ws_app = websocket.WebSocketApp(
+            ws_url,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close
+        )
+        
+        print("🔄 Starting WebSocket (Ctrl+C to stop)...\n")
+        
+        try:
+            # Run WebSocket event loop (blocks until connection closes)
+            # No threading needed - TwelveData WebSocket is synchronous event-driven
+            # Disable SSL verification to avoid certificate issues on macOS
+            ws_app.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
+        except KeyboardInterrupt:
+            print("\n\n🛑 Stopping WebSocket...")
+            ws_app.close()
+        
+        # Summary
+        print(f"\n{'='*80}")
+        print(f"📊 WEBSOCKET SCAN COMPLETE")
+        print(f"{'='*80}")
+        print(f"Signals generated: {len(self.signals_today)}")
+        if self.signals_today:
+            print(f"Tickers: {', '.join([s['ticker'] for s in self.signals_today])}")
+        print(f"{'='*80}\n")
+    
+    def _evaluate_ticker_ws(self, ticker: str, scan_date: datetime, et_tz):
+        """Evaluate ticker using WebSocket data"""
+        if ticker in self.signaled_tickers:
+            return
+        
+        if ticker not in self.ws_bars or self.ws_bars[ticker].empty:
+            return
+        
+        bars = self.ws_bars[ticker]
+        high_of_day = bars['high'].max()
+        low_of_day = bars['low'].min()
+        
+        # Calculate entry
+        entry_price = high_of_day * (1 + self.config['slippage_pct']/100)
+        stop_price = low_of_day
+        risk = entry_price - stop_price
+        
+        if risk <= 0:
+            return
+        
+        target_price = entry_price + (5 * risk)
+        risk_pct = (risk / entry_price) * 100
+        
+        # Check Pipeline 2
+        prob = self.check_pipeline2(ticker, scan_date, entry_price, stop_price, target_price)
+        
+        if prob is None:
+            return
+        
+        current_time = datetime.now(et_tz).strftime('%H:%M')
+        print(f"[{current_time}] 🎯 {ticker}: {prob*100:.1f}%", end='')
+        
+        if prob >= self.config['pipeline2_threshold']:
+            print(" ✅ PASS\n")
+            
+            # Add to watching
+            if ticker not in self.watching_stocks:
+                self.watching_stocks[ticker] = {
+                    'trigger_price': high_of_day,
+                    'prob': prob,
+                    'detected_at': current_time
+                }
+                print(f"   👀 WATCHING: Trigger @ ${high_of_day:.2f}")
+            
+            # Generate signal
+            self.generate_signal(
+                ticker, current_time, entry_price, stop_price,
+                target_price, prob, risk_pct,
+                trigger_price=self.watching_stocks[ticker]['trigger_price']
+            )
+        else:
+            print()
+    
     def is_market_open(self) -> bool:
-        """Check if US market is currently open (9:35 AM - 4:00 PM ET)"""
+        """Check if market is currently open (9:35 AM - 4:00 PM ET, Mon-Fri)"""
         et_tz = pytz.timezone('US/Eastern')
         now_et = datetime.now(et_tz)
         
-        # Check if weekday (Mon-Fri)
-        if now_et.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        # Check if weekend
+        if now_et.weekday() >= 5:  # Saturday = 5, Sunday = 6
             return False
         
-        # Check time (after 9:35 AM, before 4:00 PM)
-        current_time = now_et.time()
-        market_open = current_time >= datetime.strptime('09:35', '%H:%M').time()
-        market_close = current_time < datetime.strptime('16:00', '%H:%M').time()
+        # Check time (9:35 AM - 4:00 PM ET)
+        time = now_et.time()
+        market_open = time >= datetime.strptime('09:35', '%H:%M').time()
+        market_close = time < datetime.strptime('16:00', '%H:%M').time()
         
         return market_open and market_close
+    
+    def _second_websocket_scan_method(self):
+        """Alternative WebSocket implementation (keeping for reference)"""
+        hotlist = self.hotlist_manager.get_hotlist()
+        
+        if not hotlist:
+            print("❌ Hotlist is empty. Add tickers first with 'add TICKER'")
+            return
+        
+        tickers = [stock['ticker'] for stock in hotlist]
+        et_tz = pytz.timezone('US/Eastern')
+        today = datetime.now(et_tz).strftime('%Y-%m-%d')
+        scan_date = datetime.strptime(today, '%Y-%m-%d')
+        
+        print(f"\n{'='*80}")
+        print(f"📊 LIVE WEBSOCKET SCAN - {today}")
+        print(f"{'='*80}")
+        print(f"\n🔍 Monitoring {len(hotlist)} stocks: {', '.join(tickers)}")
+        print(f"   WebSocket mode: Real-time 5-min bars from TwelveData")
+        print(f"\n⏰ Press Ctrl+C to stop scanning\n")
+        
+        # Initialize bar storage (no lock needed - synchronous)
+        for ticker in tickers:
+            self.ws_bars[ticker] = []
+        
+        # WebSocket connection
+        api_key = os.getenv('TWELVEDATA_API_KEY')
+        if not api_key:
+            print("❌ TWELVEDATA_API_KEY not found in environment")
+            return
+        
+        # Build subscription message
+        symbols = ','.join(tickers)
+        ws_url = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={api_key}"
+        
+        def on_message(ws, message):
+            """Handle incoming WebSocket messages"""
+            try:
+                data = json.loads(message)
+                
+                # Check for successful connection
+                if data.get('event') == 'subscribe-status':
+                    if data.get('status') == 'ok':
+                        print(f"✅ Subscribed to {data.get('symbol')}")
+                    return
+                
+                # Handle price updates
+                if 'symbol' in data and 'price' in data:
+                    ticker = data['symbol']
+                    
+                    # Convert to bar format (we'll aggregate 5-min bars ourselves)
+                    bar_data = {
+                        'timestamp': datetime.fromtimestamp(data.get('timestamp', time.time()), tz=et_tz),
+                        'price': float(data['price']),
+                        'high': float(data.get('day_high', data['price'])),
+                        'low': float(data.get('day_low', data['price'])),
+                        'volume': int(data.get('day_volume', 0))
+                    }
+                    
+                    # Store bar (no lock needed - synchronous event loop)
+                    if ticker not in self.ws_bars:
+                        self.ws_bars[ticker] = []
+                    self.ws_bars[ticker].append(bar_data)
+                    
+                    # Check if we should evaluate (every 5 minutes)
+                    self._check_ticker_websocket(ticker, scan_date)
+                    
+            except Exception as e:
+                print(f"❌ Error processing message: {e}")
+        
+        def on_error(ws, error):
+            """Handle WebSocket errors"""
+            print(f"❌ WebSocket error: {error}")
+        
+        def on_close(ws, close_status_code, close_msg):
+            """Handle WebSocket close"""
+            print(f"\n🔌 WebSocket connection closed")
+        
+        def on_open(ws):
+            """Subscribe to tickers when connection opens"""
+            print(f"🔌 WebSocket connected\n")
+            
+            # Subscribe to each ticker
+            for ticker in tickers:
+                subscribe_msg = {
+                    "action": "subscribe",
+                    "params": {
+                        "symbols": ticker
+                    }
+                }
+                ws.send(json.dumps(subscribe_msg))
+        
+        # Create WebSocket connection
+        ws = websocket.WebSocketApp(
+            ws_url,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close
+        )
+        
+        print("🔄 Starting WebSocket (Ctrl+C to stop)...\n")
+        
+        try:
+            # Run synchronous WebSocket event loop (blocks until closed)
+            # Disable SSL verification to avoid certificate issues on macOS
+            ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
+        except KeyboardInterrupt:
+            print("\n\n🛑 Stopping WebSocket...")
+            ws.close()
+        
+        # Summary
+        print(f"\n{'='*80}")
+        print(f"📊 WEBSOCKET SCAN COMPLETE")
+        print(f"{'='*80}")
+        print(f"Signals generated: {len(self.signals_today)}")
+        if self.signals_today:
+            print(f"Tickers: {', '.join([s['ticker'] for s in self.signals_today])}")
+        print(f"{'='*80}\n")
+    
+    def _check_ticker_websocket(self, ticker: str, scan_date: datetime):
+        """Check Pipeline 2 for ticker using WebSocket data"""
+        # Skip if already signaled
+        if ticker in self.signaled_tickers:
+            return
+        
+        if ticker not in self.ws_bars or not self.ws_bars[ticker]:
+            return
+        
+        # Get all bars for today
+        bars = self.ws_bars[ticker]
+        
+        # Calculate high/low of day so far
+        high_of_day = max(b['high'] for b in bars)
+        low_of_day = min(b['low'] for b in bars)
+        current_price = bars[-1]['price']
+        
+        # Calculate hypothetical entry
+        entry_price = high_of_day * (1 + self.config['slippage_pct']/100)
+        stop_price = low_of_day
+        risk = entry_price - stop_price
+        
+        if risk <= 0:
+            return
+        
+        target_price = entry_price + (5 * risk)
+        risk_pct = (risk / entry_price) * 100
+        
+        # Check Pipeline 2
+        prob = self.check_pipeline2(
+            ticker, scan_date, entry_price, stop_price, target_price
+        )
+        
+        if prob is None:
+            return
+        
+        et_tz = pytz.timezone('US/Eastern')
+        current_time = datetime.now(et_tz).strftime('%H:%M')
+        
+        # Check if passes threshold
+        if prob >= self.config['pipeline2_threshold']:
+            # Add to watching if not already
+            if ticker not in self.watching_stocks:
+                self.watching_stocks[ticker] = {
+                    'trigger_price': high_of_day,
+                    'prob': prob,
+                    'detected_at': current_time
+                }
+                print(f"\n[{current_time}] 👀 {ticker} WATCHING: {prob*100:.1f}% - Trigger: ${high_of_day:.2f}")
+            
+            # Generate signal
+            print(f"[{current_time}] 🎯 {ticker} Pipeline 2: {prob*100:.1f}% ✅ PASS\n")
+            self.generate_signal(
+                ticker, current_time, entry_price, stop_price,
+                target_price, prob, risk_pct,
+                trigger_price=self.watching_stocks[ticker]['trigger_price']
+            )
     
     def show_hotlist(self):
         """Display current hotlist"""
@@ -728,7 +1107,11 @@ class LiveScanner:
                             print(f"\n⚠️  Market is closed (current time: {now_et.strftime('%H:%M')} ET)")
                             print("   Market hours: 9:35 AM - 4:00 PM ET, Mon-Fri\n")
                         else:
-                            self.scan_intraday_live()
+                            # Choose mode based on ws_mode flag
+                            if self.ws_mode:
+                                self.scan_intraday_websocket()
+                            else:
+                                self.scan_intraday_live()
                 
                 elif command == 'revalidate':
                     print(f"\n🔍 Re-validating hotlist with Pipeline 1...\n")
@@ -761,6 +1144,8 @@ def main():
     parser.add_argument('--date', type=str, help='Simulation date (YYYY-MM-DD)')
     parser.add_argument('--config', type=str, default='config/trading_bot.yaml',
                        help='Config file path')
+    parser.add_argument('--websocket', action='store_true',
+                       help='Use WebSocket for live mode (default: REST API polling)')
     
     args = parser.parse_args()
     
@@ -782,7 +1167,7 @@ def main():
             sys.exit(1)
     
     # Run bot
-    bot = LiveScanner(config, simulation_date=args.date)
+    bot = LiveScanner(config, simulation_date=args.date, ws_mode=args.websocket)
     bot.run_cli()
 
 
