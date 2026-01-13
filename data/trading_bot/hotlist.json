@@ -1,0 +1,53 @@
+{
+  "hotlist": [
+    {
+      "ticker": "POET",
+      "probability": 0.873647918913751,
+      "added_date": "2026-01-08",
+      "consol_high": 7.840000152587891,
+      "consol_low": 6.190000057220459,
+      "consol_range_pct": 26.655897901693127
+    },
+    {
+      "ticker": "QBTS",
+      "probability": 0.7833753425271316,
+      "added_date": "2026-01-12",
+      "consol_high": 32.154998779296875,
+      "consol_low": 24.764999389648438,
+      "consol_range_pct": 29.840498977510155
+    },
+    {
+      "ticker": "TE",
+      "probability": 0.8926746059510267,
+      "added_date": "2026-01-12",
+      "consol_high": 8.454999923706055,
+      "consol_low": 6.190000057220459,
+      "consol_range_pct": 36.591273756832
+    },
+    {
+      "ticker": "TMC",
+      "probability": 0.758215370331281,
+      "added_date": "2026-01-13",
+      "consol_high": 7.809999942779541,
+      "consol_low": 6.099999904632568,
+      "consol_range_pct": 28.032787948870862
+    },
+    {
+      "ticker": "SIDU",
+      "probability": 0.8153766882135105,
+      "added_date": "2026-01-13",
+      "consol_high": 5.389999866485596,
+      "consol_low": 1.7649999856948853,
+      "consol_range_pct": 205.382431171156
+    },
+    {
+      "ticker": "HYMC",
+      "probability": 0.8504080363451196,
+      "added_date": "2026-01-13",
+      "consol_high": 30.329999923706055,
+      "consol_low": 21.200000762939453,
+      "consol_range_pct": 43.06603222735307
+    }
+  ],
+  "last_updated": "2026-01-13T18:19:59.317143"
+}

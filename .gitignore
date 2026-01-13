@@ -36,9 +36,15 @@ logs/
 # Scanner results (temporary outputs)
 results/scanners/*.json
 
-# Ignore all JSON and TXT files
+# Ignore all JSON files except specific configs
 *.json
+!config/*.json
+!data/trading_bot/*.json
+
+# Ignore TXT files except requirements and deployment files
 *.txt
+!requirements.txt
+!runtime.txt
 
 # Ignore all JSONL files
 *.jsonl
