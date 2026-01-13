@@ -41,7 +41,7 @@ python src/web_app/app.py
    - Name: `stock-scanner` (or your choice)
    - Environment: Python 3
    - Build Command: `pip install -r requirements.txt`
-   - Start Command: (uses Procfile automatically)
+   - Start Command: `gunicorn --chdir src/web_app app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 2`
 
 4. Add environment variables in Render dashboard:
    - `TWELVEDATA_API_KEY`: your TwelveData API key
