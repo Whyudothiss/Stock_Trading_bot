@@ -65,7 +65,7 @@ transactions_collection = db.transactions
 portfolio_values_collection = db.portfolio_values
 
 (TICKER, QUANTITY, PRICE, TRIM_TYPE, TRIM_VALUE, 
- DELETE_CONFIRM, EDIT_SELECT, EDIT_FIELD, EDIT_VALUE) = range(9)
+ DELETE_TRANSACTION, DELETE_CONFIRM, EDIT_SELECT, EDIT_FIELD, EDIT_VALUE) = range(10)
 
 class PortfolioTracker():
     def __init__(self):
@@ -179,6 +179,7 @@ Your personal stock portfolio management bot. Here are the available commands:
 🛠 Management Commands:
 /delete - Delete a transaction
 /edit - Edit a transaction
+/exit - Cancel current operation
 /help - Show this help message
 
 Ready to track your investments! Use /buy to record your first purchase."""
@@ -262,6 +263,15 @@ Ready to track your investments! Use /buy to record your first purchase."""
             context.user_data['quantity'] = quantity
             ticker = context.user_data['ticker']
             action = context.user_data['action']
+            
+            # For sell/trim, validate quantity immediately
+            if action in ['sell', 'trim']:
+                user_id = update.effective_user.id
+                current_position = self.get_current_positions(user_id, ticker)
+                if current_position < quantity:
+                    await update.message.reply_text(f"❌ Error: You only own {current_position} shares of {ticker}, "
+                        f"but trying to {action} {quantity} shares.\n\nPlease enter a valid quantity.")
+                    return QUANTITY
 
             await update.message.reply_text(f"Stock: {ticker}\nQuantity: {quantity} shares\n\n What price did you {'buy' if action == 'buy' else 'sell'} at? (USD)")
             return PRICE
@@ -282,14 +292,6 @@ Ready to track your investments! Use /buy to record your first purchase."""
             quantity = context.user_data['quantity']
             action = context.user_data['action']
             total_value = quantity * price
-
-            # Check for sell/trim whether user has enough shares
-            if action in ['sell', 'trim']:
-                current_position = self.get_current_positions(user_id, ticker)
-                if current_position < quantity:
-                    await update.message.reply_test(f"❌ Error: You only own {current_position} shares of {ticker}, "
-                        f"but trying to {action} {quantity} shares.\n\nTransaction cancelled.")
-                    return ConversationHandler.END
 
             transaction ={
                 "user_id": user_id,
@@ -318,18 +320,45 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
             await update.message.reply_text(confirmation)
             return ConversationHandler.END
         except ValueError:
-            await update.message.reoly_text("Please enter a valid price)")
+            await update.message.reply_text("Please enter a valid price")
             return PRICE
 
     async def sell_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start sell transaction"""
+        user_id = update.effective_user.id
+        holdings = self.get_user_holdings(user_id)
+        
+        if not holdings:
+            await update.message.reply_text("📉 You don't have any holdings to sell.")
+            return ConversationHandler.END
+        
         context.user_data['action'] = 'sell'
-        await update.message.reply_text("📉 Let's record a stock sale!\n\nWhat's the ticker symbol?")
+        
+        # Show available tickers
+        message = "📉 Let's record a stock sale!\n\n💼 Your current holdings:\n\n"
+        for ticker, data in holdings.items():
+            message += f"• {ticker}: {data['quantity']:.2f} shares\n"
+        message += "\nWhat ticker would you like to sell?"
+        
+        await update.message.reply_text(message)
         return TICKER
 
     async def trim_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Start trim transaction"""
-        await update.message.reply_text("✂️ Let's record a stock trim (partial sell)!\n\nWhat's the ticker symbol?")
+        user_id = update.effective_user.id
+        holdings = self.get_user_holdings(user_id)
+        
+        if not holdings:
+            await update.message.reply_text("✂️ You don't have any holdings to trim.")
+            return ConversationHandler.END
+        
+        # Show available tickers
+        message = "✂️ Let's record a stock trim (partial sell)!\n\n💼 Your current holdings:\n\n"
+        for ticker, data in holdings.items():
+            message += f"• {ticker}: {data['quantity']:.2f} shares\n"
+        message += "\nWhat ticker would you like to trim?"
+        
+        await update.message.reply_text(message)
         return TICKER
 
     async def get_trim_ticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -348,7 +377,7 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
         keyboard = [['Percentage', 'Quantity']]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
 
-        await update.message.reply_test(
+        await update.message.reply_text(
             f"Stock: {ticker}\nCurrent position: {current_position} shares\n\n"
             "How would you like to trim?",
             reply_markup=reply_markup
@@ -362,10 +391,10 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
             return TRIM_TYPE
         ticker = context.user_data['ticker']
         context.user_data['trim_type'] = trim_type
-        current_position = context.user_data['current)position']
+        current_position = context.user_data['current_position']
 
         if trim_type == 'percentage':
-            await update.message.reply_test(
+            await update.message.reply_text(
                 f"Stock: {ticker}\nCurrent: {current_position} shares\n\n"
                 "What percentage would you like to sell? (e.g., 25 for 25%)",
                 reply_markup=ReplyKeyboardRemove()
@@ -418,7 +447,7 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
             {"$group": {
                 "_id": "$ticker",
                 "total_bought": {"$sum": {"$cond": [{"$eq": ["$action", "buy"]}, "$quantity", 0]}},
-                "total_sold": {"$sum": {"$cond": [{"$neq": ["$action", "buy"]}, "$quantity", 0]}}
+                "total_sold": {"$sum": {"$cond": [{"$ne": ["$action", "buy"]}, "$quantity", 0]}}
             }}
         ]
 
@@ -434,14 +463,18 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
             {"$group": {
                 "_id": "$ticker",
                 "total_bought_qty": {"$sum": {"$cond": [{"$eq": ["$action", "buy"]}, "$quantity", 0]}},
-                "total_sold_qty": {"$sum": {"$cond": [{"$neq": ["$action", "buy"]}, "$quantity", 0]}},
+                "total_sold_qty": {"$sum": {"$cond": [{"$ne": ["$action", "buy"]}, "$quantity", 0]}},
                 "total_bought_value": {"$sum": {"$cond": [{"$eq": ["$action", "buy"]}, "$total_value", 0]}},
-                "total_sold_value": {"$sum": {"$cond": [{"$neq": ["$action", "buy"]}, "$total_value", 0]}}
-            }},    
-            {"$addFields": {"$current_quantity": {"$subtract": ["total_bought_qty", "total_sold_qty"]}},
-             "$current_cost": {"$subtract": ["$total_bought_value", {"multiply": [{"$divide": ["$total_bought_value", "$total_bought_qty"]}, "$total_sold_qty"]}]
-            }},                   
-            {"$match": {"$current_quantity": {"$gt": 0}}}
+                "total_sold_value": {"$sum": {"$cond": [{"$ne": ["$action", "buy"]}, "$total_value", 0]}}
+            }},
+            {"$addFields": {
+                "current_quantity": {"$subtract": ["$total_bought_qty", "$total_sold_qty"]},
+                "current_cost": {"$subtract": [
+                    "$total_bought_value",
+                    {"$multiply": [{"$divide": ["$total_bought_value", "$total_bought_qty"]}, "$total_sold_qty"]}
+                ]}
+            }},
+            {"$match": {"current_quantity": {"$gt": 0}}}
         ]
 
         results = list(transactions_collection.aggregate(pipeline))
@@ -451,10 +484,10 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
             ticker = result["_id"]
             # calculate weighted average cost for remaining shares
             avg_buy_price = result["total_bought_value"] / result["total_bought_qty"] if result["total_bought_qty"] > 0 else 0
-            remaing_cost = avg_buy_price * result["$current_quantity"]
+            remaing_cost = avg_buy_price * result["current_quantity"]
 
             holdings[ticker] = {
-                "quantity": result["$current_quantity"],
+                "quantity": result["current_quantity"],
                 "total_cost": remaing_cost,
                 "avg_cost": avg_buy_price
             }
@@ -468,15 +501,13 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
             {"$group": {
                 "_id": "$ticker",
                 "total_bought_qty": {"$sum": {"$cond": [{"$eq": ["$action", "buy"]}, "$quantity", 0]}},
-                "total_sold_qty": {"$sum": {"$cond": [{"$neq": ["$action", "buy"]}, "$quantity", 0]}},
+                "total_sold_qty": {"$sum": {"$cond": [{"$ne": ["$action", "buy"]}, "$quantity", 0]}},
                 "total_bought_value": {"$sum": {"$cond": [{"$eq": ["$action", "buy"]}, "$total_value", 0]}},
-                "total_sold_value": {"$sum": {"$cond": [{"$neq": ["$action", "buy"]}, "$total_value", 0]}}
+                "total_sold_value": {"$sum": {"$cond": [{"$ne": ["$action", "buy"]}, "$total_value", 0]}}
             }},
             {"$match": {
-                "$and": [
-                    {"$total_sold_qty": {"$gt": 0}},
-                    {"$expr": {"$eq": ["$total_bought_qty", "$total_sold_qty"]}}
-                ]
+                "total_sold_qty": {"$gt": 0},
+                "$expr": {"$eq": ["$total_bought_qty", "$total_sold_qty"]}
             }}
         ]
         
@@ -599,6 +630,62 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
         await update.message.reply_text(message)
 
 
+    async def delete_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Start delete transaction flow"""
+        user_id = update.effective_user.id
+        transactions = list(transactions_collection.find({"user_id": user_id}).sort("timestamp", -1).limit(20))
+        
+        if not transactions:
+            await update.message.reply_text("🗑 No transactions found to delete.")
+            return ConversationHandler.END
+        
+        # Store transactions in context for later reference
+        context.user_data['transactions'] = transactions
+        
+        # Display recent transactions
+        message = "🗑 DELETE TRANSACTION\n\n"
+        message += "Recent transactions (last 20):\n\n"
+        
+        for i, tx in enumerate(transactions, 1):
+            action_emoji = "📈" if tx['action'] == 'buy' else "📉"
+            date_str = tx['timestamp'].strftime('%Y-%m-%d %H:%M')
+            message += f"{i}. {action_emoji} {tx['action'].upper()} {tx['ticker']} - {tx['quantity']} shares @ ${tx['price']:.2f} ({date_str})\n"
+        
+        message += "\nEnter the number of the transaction to delete (or /exit to cancel):"
+        await update.message.reply_text(message)
+        return DELETE_TRANSACTION
+    
+    async def delete_execute(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Execute the deletion"""
+        try:
+            selection = int(update.message.text)
+            transactions = context.user_data.get('transactions', [])
+            
+            if selection < 1 or selection > len(transactions):
+                await update.message.reply_text(f"❌ Invalid selection. Please enter a number between 1 and {len(transactions)}.")
+                return DELETE_TRANSACTION
+            
+            # Get the selected transaction
+            tx = transactions[selection - 1]
+            
+            # Delete from database
+            result = transactions_collection.delete_one({"_id": tx['_id']})
+            
+            if result.deleted_count > 0:
+                action_emoji = "📈" if tx['action'] == 'buy' else "📉"
+                await update.message.reply_text(
+                    f"✅ Transaction deleted successfully!\n\n"
+                    f"{action_emoji} {tx['action'].upper()} {tx['ticker']} - {tx['quantity']} shares @ ${tx['price']:.2f}"
+                )
+            else:
+                await update.message.reply_text("❌ Failed to delete transaction.")
+            
+            return ConversationHandler.END
+            
+        except ValueError:
+            await update.message.reply_text("❌ Please enter a valid number.")
+            return DELETE_TRANSACTION
+
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         """Cancel the conversation"""
         await update.message.reply_text(
@@ -621,7 +708,8 @@ def main():
             QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, tracker.get_quantity)],
             PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tracker.get_price_and_execute)],     
         },
-        fallbacks = [CommandHandler('cancel', tracker.cancel)],
+        fallbacks = [CommandHandler('cancel', tracker.cancel), CommandHandler('exit', tracker.cancel)],
+        allow_reentry=False,
     )
 
     # Sell conversation handler
@@ -632,7 +720,8 @@ def main():
             QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, tracker.get_quantity)],
             PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tracker.get_price_and_execute)],
         },
-        fallbacks=[CommandHandler('cancel', tracker.cancel)],
+        fallbacks=[CommandHandler('cancel', tracker.cancel), CommandHandler('exit', tracker.cancel)],
+        allow_reentry=False,
     )
 
     # Trim conversation handler
@@ -644,7 +733,18 @@ def main():
             TRIM_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tracker.get_trim_value)],
             PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tracker.get_price_and_execute)],
         },
-        fallbacks=[CommandHandler('cancel', tracker.cancel)],
+        fallbacks=[CommandHandler('cancel', tracker.cancel), CommandHandler('exit', tracker.cancel)],
+        allow_reentry=False,
+    )
+    
+    # Delete conversation handler
+    delete_handler = ConversationHandler(
+        entry_points=[CommandHandler('delete', tracker.delete_start)],
+        states={
+            DELETE_TRANSACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, tracker.delete_execute)],
+        },
+        fallbacks=[CommandHandler('cancel', tracker.cancel), CommandHandler('exit', tracker.cancel)],
+        allow_reentry=False,
     )
 
     # Add handlers
@@ -653,6 +753,7 @@ def main():
     application.add_handler(buy_handler)
     application.add_handler(sell_handler)
     application.add_handler(trim_handler)
+    application.add_handler(delete_handler)
     application.add_handler(CommandHandler("current", tracker.current_holdings))
     application.add_handler(CommandHandler("past", tracker.past_positions))
     application.add_handler(CommandHandler("pnl", tracker.pnl_summary))
@@ -660,32 +761,33 @@ def main():
     application.add_handler(CommandHandler("value", tracker.value))
     application.add_handler(CommandHandler("equity", tracker.equity_curve))
 
-    # Schedule daily portfolio value updates
-    async def update_all_portfolios():
-        while True:
-            users = users_collection.find({})
-            for user in users:
-                await tracker.update_portfolio_value(user["user_id"])
-            # Wait for 24 hours before next update
-            await asyncio.sleep(24 * 60 * 60)
-
-    # Start the background task
-    application.job_queue.run_repeating(
-        lambda ctx: asyncio.create_task(update_all_portfolios()),
-        interval=timedelta(days=1)
-    )
-
-    # Configure port for Railway deployment
+    # Configure port for cloud deployment (Railway or Render)
     port = int(os.getenv("PORT", 8080))
     print(f"🎯 myPortfolioTracker bot is starting on port {port}...")
     
+    # Check if running on Railway or Render
     if os.getenv("RAILWAY_ENVIRONMENT"):
         print("Running on Railway - using webhooks")
+        webhook_url = f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}"
         application.run_webhook(
             listen="0.0.0.0",
             port=port,
-            webhook_url=f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}"
+            webhook_url=webhook_url
         )
+    elif os.getenv("RENDER"):
+        print("Running on Render - using webhooks")
+        # Render automatically provides RENDER_EXTERNAL_URL
+        webhook_url = os.getenv("RENDER_EXTERNAL_URL", "")
+        if webhook_url:
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                webhook_url=webhook_url
+            )
+        else:
+            print("ERROR: RENDER_EXTERNAL_URL not found!")
+            # Fallback to polling for testing
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
     else:
         print("Running locally - using polling")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
