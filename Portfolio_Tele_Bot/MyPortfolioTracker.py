@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from pymongo import MongoClient
 from bson import ObjectId
@@ -169,16 +169,14 @@ Your personal stock portfolio management bot. Here are the available commands:
 /buy - Record a stock purchase
 /sell - Record a stock sale  
 /trim - Partial sell (by % or quantity)
-/current - View current holdings
+/current - View current holdings with P&L
 /past - View sold positions with P&L
 /pnl - Overall profit/loss summary
-/portfolio - Quick portfolio overview
 /value - Real-time portfolio value
 /equity - Display equity curve
 
 🛠 Management Commands:
 /delete - Delete a transaction
-/edit - Edit a transaction
 /exit - Cancel current operation
 /help - Show this help message
 
@@ -273,7 +271,9 @@ Ready to track your investments! Use /buy to record your first purchase."""
                         f"but trying to {action} {quantity} shares.\n\nPlease enter a valid quantity.")
                     return QUANTITY
 
-            await update.message.reply_text(f"Stock: {ticker}\nQuantity: {quantity} shares\n\n What price did you {'buy' if action == 'buy' else 'sell'} at? (USD)")
+            # Dynamic message based on action
+            action_text = "buy" if action == "buy" else "sell"
+            await update.message.reply_text(f"Stock: {ticker}\nQuantity: {quantity} shares\n\nWhat price did you {action_text} at? (USD)")
             return PRICE
         
         except ValueError:
@@ -495,7 +495,11 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
         return holdings
     
     def get_past_positions_with_pnl(self, user_id):
-        """Get past positions that were completely sold with P&L data"""
+        """Get past positions that were completely sold with P&L data (excluding reopened positions)"""
+        # First, get current holdings to exclude reopened positions
+        current_holdings = self.get_user_holdings(user_id)
+        current_tickers = set(current_holdings.keys())
+        
         pipeline = [
             {"$match": {"user_id": user_id}},
             {"$group": {
@@ -507,7 +511,7 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
             }},
             {"$match": {
                 "total_sold_qty": {"$gt": 0},
-                "$expr": {"$eq": ["$total_bought_qty", "$total_sold_qty"]}
+                "$expr": {"$gte": ["$total_sold_qty", "$total_bought_qty"]}  # Sold >= bought (completely closed)
             }}
         ]
         
@@ -517,6 +521,11 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
         for result in results:
             ticker = result["_id"]
+            
+            # Skip if this ticker is currently held (reopened position)
+            if ticker in current_tickers:
+                continue
+                
             bought_qty = result["total_bought_qty"]
             sold_qty = min(result["total_sold_qty"], bought_qty)
 
@@ -529,7 +538,7 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
         return past_positions
     
     async def current_holdings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show current holdings"""
+        """Show current holdings with real-time prices and unrealized P&L"""
         user_id = update.effective_user.id
         holdings = self.get_user_holdings(user_id)
 
@@ -539,17 +548,41 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
         
         message = "📊 Your Current Holdings:\n\n"
         total_invested = 0
+        total_current_value = 0
+        
         for ticker, data in holdings.items():
             avg_price = data["total_cost"] / data["quantity"]
             total_cost = data["total_cost"]
             total_invested += total_cost
-
+            
+            # Get current price
+            current_price = self.get_real_time_price(ticker)
+            
             message += f"🏷 {ticker}\n"
             message += f"   Shares: {data['quantity']:.2f}\n"
             message += f"   Avg Price: ${avg_price:.2f}\n"
-            message += f"   Total Cost: ${total_cost:.2f}\n\n"
+            message += f"   Total Cost: ${total_cost:.2f}\n"
+            
+            if current_price:
+                current_value = current_price * data['quantity']
+                unrealized_pnl = current_value - total_cost
+                unrealized_pct = (unrealized_pnl / total_cost * 100) if total_cost > 0 else 0
+                total_current_value += current_value
+                
+                pnl_emoji = "📈" if unrealized_pnl >= 0 else "📉"
+                message += f"   Current Price: ${current_price:.2f}\n"
+                message += f"   {pnl_emoji} Unrealized P&L: ${unrealized_pnl:.2f} ({unrealized_pct:+.1f}%)\n\n"
+            else:
+                message += f"   ⚠️ Unable to fetch current price\n\n"
         
-        message += f"💰 Total Invested: ${total_invested:.2f}"
+        message += f"💰 Total Invested: ${total_invested:.2f}\n"
+        
+        if total_current_value > 0:
+            total_unrealized = total_current_value - total_invested
+            total_unrealized_pct = (total_unrealized / total_invested * 100) if total_invested > 0 else 0
+            pnl_emoji = "📈" if total_unrealized >= 0 else "📉"
+            message += f"💵 Current Value: ${total_current_value:.2f}\n"
+            message += f"{pnl_emoji} Total Unrealized P&L: ${total_unrealized:.2f} ({total_unrealized_pct:+.1f}%)"
 
         await update.message.reply_text(message)
 
@@ -594,38 +627,40 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
             for data in past_positions.values()
         )
 
-        # Current investments
+        # Current investments and unrealized P&L
         total_invested = sum(
             data["total_cost"] for data in current_holdings.values()
         )
+        
+        # Calculate unrealized P&L
+        total_current_value = 0
+        for ticker, data in current_holdings.items():
+            current_price = self.get_real_time_price(ticker)
+            if current_price:
+                total_current_value += current_price * data['quantity']
+        
+        unrealized_pnl = total_current_value - total_invested if total_current_value > 0 else 0
+        total_pnl = realized_pnl + unrealized_pnl
 
         message = "💰 P&L SUMMARY 💰\n\n"
         message += f"📈 Realized P&L: ${realized_pnl:.2f}\n"
         message += f"💼 Current Invested: ${total_invested:.2f}\n"
-        message += f"📊 Total Positions: {len(current_holdings)} current, {len(past_positions)} closed\n\n"
+        
+        if total_current_value > 0:
+            message += f"💵 Current Value: ${total_current_value:.2f}\n"
+            unrealized_emoji = "📈" if unrealized_pnl >= 0 else "📉"
+            message += f"{unrealized_emoji} Unrealized P&L: ${unrealized_pnl:.2f}\n\n"
+            total_emoji = "🎉" if total_pnl >= 0 else "📊"
+            message += f"{total_emoji} TOTAL P&L: ${total_pnl:.2f}\n\n"
+        else:
+            message += "\n"
+        
+        message += f"📊 Positions: {len(current_holdings)} open, {len(past_positions)} closed\n\n"
 
-        if realized_pnl >= 0:
+        if total_pnl >= 0:
             message += "🎉 Great job! You're in profit territory!"
         else:
             message += "📊 Keep tracking! Every trade is a learning opportunity."
-
-        await update.message.reply_text(message)
-
-    async def portfolio_overview(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Quick portfolio overview"""
-        user_id = update.effective_user.id
-        current_holdings = self.get_user_holdings(user_id)
-        past_positions = self.get_past_positions_with_pnl(user_id)
-
-        total_invested = sum(data["total_cost"] for data in current_holdings.values())
-        realized_pnl = sum((data["total_sold"] - data["total_bought"]) for data in past_positions.values())
-
-        message = "🎯 PORTFOLIO OVERVIEW 🎯\n\n"
-        message += f"💼 Active Positions: {len(current_holdings)}\n"
-        message += f"💰 Total Invested: ${total_invested:.2f}\n"
-        message += f"📈 Realized P&L: ${realized_pnl:.2f}\n"
-        message += f"📜 Closed Positions: {len(past_positions)}\n\n"
-        message += "Use /current for detailed holdings\nUse /pnl for full P&L breakdown"
 
         await update.message.reply_text(message)
 
@@ -694,6 +729,24 @@ Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}
         )
         return ConversationHandler.END
 
+async def setup_bot_commands(application: Application):
+    """Set up bot command menu"""
+    commands = [
+        BotCommand("start", "🎯 Start the bot"),
+        BotCommand("help", "❓ Show help message"),
+        BotCommand("buy", "📈 Record stock purchase"),
+        BotCommand("sell", "📉 Record stock sale"),
+        BotCommand("trim", "✂️ Partial sell position"),
+        BotCommand("current", "📊 View current holdings"),
+        BotCommand("past", "📜 View closed positions"),
+        BotCommand("pnl", "💰 P&L summary"),
+        BotCommand("value", "💵 Real-time portfolio value"),
+        BotCommand("equity", "📈 Display equity curve"),
+        BotCommand("delete", "🗑 Delete transaction"),
+        BotCommand("exit", "❌ Cancel current operation"),
+    ]
+    await application.bot.set_my_commands(commands)
+
 def main():
     tracker = PortfolioTracker()
 
@@ -757,9 +810,11 @@ def main():
     application.add_handler(CommandHandler("current", tracker.current_holdings))
     application.add_handler(CommandHandler("past", tracker.past_positions))
     application.add_handler(CommandHandler("pnl", tracker.pnl_summary))
-    application.add_handler(CommandHandler("portfolio", tracker.portfolio_overview))
     application.add_handler(CommandHandler("value", tracker.value))
     application.add_handler(CommandHandler("equity", tracker.equity_curve))
+
+    # Set up bot command menu
+    asyncio.get_event_loop().run_until_complete(setup_bot_commands(application))
 
     # Configure port for cloud deployment (Railway or Render)
     port = int(os.getenv("PORT", 8080))
