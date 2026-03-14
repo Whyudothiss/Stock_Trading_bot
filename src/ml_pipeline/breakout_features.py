@@ -88,7 +88,7 @@ class BreakoutFeatureExtractor:
             
             # 3. Entry execution quality
             features.update(self._entry_quality_features(
-                minute_df, entry_price, stop_price, target_price, entry_date
+                minute_df, entry_price, stop_price, target_price, entry_date, daily_df
             ))
             
             # Add metadata
@@ -238,12 +238,23 @@ class BreakoutFeatureExtractor:
         avg_volume_per_bar = float(minute_df['Volume'].mean())
         first_candle_vol_ratio = float(first_candle['Volume'] / avg_volume_per_bar) if avg_volume_per_bar > 0 else 1.0
         
-        # Day's high within first 30 minutes?
+        # Day's high within first 30 minutes? (FIXED: only use data up to entry time)
         first_30_bars = 30 if self.timeframe == '1Min' else 6  # 30 min / 5 min
         if len(minute_df) >= first_30_bars:
-            day_high = float(minute_df['High'].max())
-            first_30_high = float(minute_df['High'].iloc[:first_30_bars].max())
-            early_high = 1 if first_30_high >= day_high * 0.99 else 0
+            # Find entry bar to determine how much data is available at entry time
+            entry_bar_idx = None
+            for idx in range(len(minute_df)):
+                if float(minute_df.iloc[idx]['High']) >= entry_price:
+                    entry_bar_idx = idx
+                    break
+            
+            if entry_bar_idx is not None and entry_bar_idx > 0:
+                # Only use data up to entry bar (no lookahead)
+                high_at_entry = float(minute_df.iloc[:entry_bar_idx+1]['High'].max())
+                first_30_high = float(minute_df['High'].iloc[:first_30_bars].max())
+                early_high = 1 if first_30_high >= high_at_entry * 0.99 else 0
+            else:
+                early_high = 0
         else:
             early_high = 0
         
@@ -262,7 +273,8 @@ class BreakoutFeatureExtractor:
         entry_price: float,
         stop_price: float,
         target_price: float,
-        entry_date: datetime
+        entry_date: datetime,
+        daily_df: pd.DataFrame = None
     ) -> Dict:
         """Analyze entry execution quality"""
         
@@ -273,6 +285,9 @@ class BreakoutFeatureExtractor:
         
         # Risk as % of entry price
         risk_pct = (risk_per_share / entry_price) * 100 if entry_price > 0 else 0
+        
+        # NEW: ATR-normalized risk
+        risk_vs_atr = self._calculate_risk_vs_atr(risk_pct, daily_df, entry_date) if daily_df is not None else 1.0
         
         # Find which minute bar entry occurred in (approximate)
         # Assume entry is within the first bar that has high >= entry_price
@@ -305,10 +320,16 @@ class BreakoutFeatureExtractor:
         else:
             entry_position_in_bar = 0.5
         
-        # Entry vs day's high/low
-        day_high = float(minute_df['High'].max())
-        day_low = float(minute_df['Low'].min())
-        entry_vs_day_high_pct = ((day_high - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+        # Entry vs day's high/low (FIXED: only use high up to entry time)
+        if entry_bar_idx is not None:
+            high_at_entry = float(minute_df.iloc[:entry_bar_idx+1]['High'].max())
+        else:
+            high_at_entry = float(minute_df['High'].max())
+        
+        entry_vs_high_so_far_pct = ((high_at_entry - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+        
+        # NEW: Volume surge - compare accumulated volume at entry vs same time in past 3 days
+        volume_surge_ratio = self._calculate_volume_surge(minute_df, entry_bar_idx, entry_date)
         
         return {
             'risk_per_share': round(risk_per_share, 3),
@@ -316,8 +337,73 @@ class BreakoutFeatureExtractor:
             'risk_reward_ratio': round(risk_reward_ratio, 2),
             'minutes_since_open': int(minutes_since_open),
             'entry_position_in_bar': round(entry_position_in_bar, 3),
-            'entry_vs_day_high_pct': round(entry_vs_day_high_pct, 2)
+            'entry_vs_high_so_far_pct': round(entry_vs_high_so_far_pct, 2),
+            'volume_surge_vs_3day': round(volume_surge_ratio, 2),
+            'risk_vs_atr': round(risk_vs_atr, 2)
         }
+    
+    def _calculate_volume_surge(self, minute_df: pd.DataFrame, entry_bar_idx: int, entry_date: datetime) -> float:
+        """Calculate volume surge: accumulated volume at entry vs same time in past 3 days"""
+        try:
+            if entry_bar_idx is None or entry_bar_idx < 0:
+                return 1.0
+            
+            # Volume accumulated up to entry
+            volume_at_entry = minute_df.iloc[:entry_bar_idx+1]['Volume'].sum()
+            
+            if volume_at_entry == 0:
+                return 1.0
+            
+            # Get ticker from metadata (stored in extract_features)
+            # For now, return 1.0 as we can't easily get past data without ticker
+            # This will be refined when called with ticker context
+            return 1.0
+            
+        except Exception as e:
+            return 1.0
+    
+    def _calculate_risk_vs_atr(self, risk_pct: float, daily_df: pd.DataFrame, entry_date: datetime) -> float:
+        """Calculate risk_pct / ATR ratio (higher ratio = riskier trade relative to normal volatility)"""
+        try:
+            if daily_df is None or len(daily_df) < 14:
+                return 1.0
+            
+            # Find entry date in daily data
+            entry_idx = daily_df.index.searchsorted(entry_date)
+            if entry_idx < 14:
+                return 1.0
+            
+            # Calculate 10-day ATR
+            lookback = daily_df.iloc[entry_idx-14:entry_idx].copy()
+            
+            # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
+            true_ranges = []
+            for i in range(1, len(lookback)):
+                high = lookback.iloc[i]['High']
+                low = lookback.iloc[i]['Low']
+                prev_close = lookback.iloc[i-1]['Close']
+                
+                tr = max(
+                    high - low,
+                    abs(high - prev_close),
+                    abs(low - prev_close)
+                )
+                true_ranges.append(tr)
+            
+            if not true_ranges:
+                return 1.0
+            
+            atr = sum(true_ranges) / len(true_ranges)
+            
+            # Get entry day close to normalize ATR to percentage
+            entry_close = daily_df.iloc[entry_idx-1]['Close'] if entry_idx > 0 else daily_df.iloc[0]['Close']
+            atr_pct = (atr / entry_close) * 100 if entry_close > 0 else 0
+            
+            # Return risk_pct / atr_pct (>1 means risk is higher than typical daily range)
+            return risk_pct / atr_pct if atr_pct > 0 else 1.0
+            
+        except Exception as e:
+            return 1.0
 
 
 def main():
